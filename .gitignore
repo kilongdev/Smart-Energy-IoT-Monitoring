@@ -1,0 +1,7 @@
+node_modules/
+dist/
+public/assets/
+.env
+coverage/
+*.log
+test-results/

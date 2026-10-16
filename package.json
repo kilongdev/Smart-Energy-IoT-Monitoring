@@ -1,0 +1,52 @@
+{
+  "name": "smart-energy-iot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Smart Energy IoT - NestJS, MongoDB, React, MQTT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/build-web.mjs",
+    "start": "node --env-file-if-exists=.env dist/src/main.js",
+    "start:dev": "npm run build && node --watch --env-file-if-exists=.env dist/src/main.js",
+    "setup": "node scripts/setup.mjs",
+    "simulator": "node --env-file-if-exists=.env scripts/simulator.mjs",
+    "test": "npm run build && node --test --test-concurrency=1 dist/test/domain.test.js dist/test/offline.test.js",
+    "test:integration": "npm run build && node --test --test-concurrency=1 dist/test/integration.test.js"
+  },
+  "dependencies": {
+    "@nestjs/common": "11.2.7",
+    "@nestjs/core": "11.2.7",
+    "@nestjs/jwt": "^11.0.0",
+    "@nestjs/platform-express": "11.2.7",
+    "@nestjs/platform-socket.io": "11.2.7",
+    "@nestjs/swagger": "^11.2.0",
+    "@nestjs/websockets": "11.2.7",
+    "bcryptjs": "^3.0.2",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.2",
+    "express": "^5.1.0",
+    "helmet": "^8.1.0",
+    "mongodb": "^6.20.0",
+    "mqtt": "^5.14.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "aedes": "^0.51.3",
+    "echarts": "^6.0.0",
+    "esbuild": "^0.25.10",
+    "mingo": "^6.7.2",
+    "mongodb-memory-server": "^10.4.3",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "socket.io-client": "^4.8.1",
+    "typescript": "^5.9.2"
+  }
+}
