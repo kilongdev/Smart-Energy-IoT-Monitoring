@@ -1,0 +1,9 @@
+#pragma once
+#define WIFI_SSID "YOUR_WIFI"
+#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+#define MQTT_HOST "192.168.1.10"
+#define MQTT_USER "energy_sim"
+#define MQTT_PASS "COPY_SIM_MQTT_PASSWORD_FROM_ENV"
+#define DEVICE_ID "44444444-4444-4444-8444-444444444444"
+#define TOPIC_BASE "campus/demo/device1"
+#define RELAY_PIN 2

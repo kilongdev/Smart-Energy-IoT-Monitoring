@@ -1,0 +1,59 @@
+services:
+  mongo:
+    image: mongo:8.0
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Chay npm run setup truoc}
+    ports: ["127.0.0.1:27018:27017"]
+    volumes: ["mongo_data:/data/db"]
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ping:1})'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  mqtt:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/bootstrap/mqtt-entrypoint.sh"]
+    environment:
+      MQTT_PASSWORD: ${MQTT_PASSWORD:?Chay npm run setup truoc}
+      SIM_MQTT_PASSWORD: ${SIM_MQTT_PASSWORD:?Chay npm run setup truoc}
+    ports: ["127.0.0.1:1883:1883"]
+    volumes:
+      - ./docker/mqtt-entrypoint.sh:/bootstrap/mqtt-entrypoint.sh:ro
+      - mqtt_data:/mosquitto/data
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_pub -h 127.0.0.1 -u energy_api -P \"$$MQTT_PASSWORD\" -t campus/health -m ok -q 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  api:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PORT: 3000
+      MONGO_URI: mongodb://user123:123456@host.docker.internal:27017/smart_energy?authSource=admin
+      MQTT_URL: mqtt://mqtt:1883
+    ports: ["127.0.0.1:${PORT:-3000}:3000"]
+    depends_on:
+      mongo: {condition: service_healthy}
+      mqtt: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/v1/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  simulator:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MQTT_URL: mqtt://mqtt:1883
+    command: ["node", "scripts/simulator.mjs"]
+    depends_on:
+      api: {condition: service_healthy}
+volumes:
+  mongo_data:
+  mqtt_data:
