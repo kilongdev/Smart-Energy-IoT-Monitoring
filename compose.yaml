@@ -34,7 +34,7 @@ services:
     env_file: .env
     environment:
       PORT: 3000
-      MONGO_URI: mongodb://user123:123456@host.docker.internal:27017/smart_energy?authSource=admin
+      MONGO_URI: mongodb://root:${MONGO_ROOT_PASSWORD}@mongo:27017/smart_energy?authSource=admin
       MQTT_URL: mqtt://mqtt:1883
     ports: ["127.0.0.1:${PORT:-3000}:3000"]
     depends_on:
