@@ -1,0 +1,85 @@
+# Render Blueprint cho Smart Energy IoT
+# Tài liệu: https://render.com/docs/blueprint-spec
+#
+# Cách dùng:
+#   1. Push repo lên GitHub.
+#   2. Render Dashboard > New > Blueprint > chọn repo > Apply.
+#   3. Render sẽ hỏi các biến còn thiếu (MONGO_URI, MQTT_URL, ...).
+#
+# Lưu ý: mọi secret KHÔNG được ghi trong file này. Render sẽ tự sinh
+# hoặc yêu cầu nhập tay ở Dashboard.
+
+services:
+  - type: web
+    name: smart-energy-iot
+    runtime: node
+    region: singapore
+    plan: free
+    branch: main
+
+    # Render đặt NODE_ENV=production khi build, nên npm sẽ bỏ qua
+    # devDependencies (typescript, esbuild) nếu không có --include=dev.
+    buildCommand: npm ci --include=dev --no-audit --no-fund && npm run build
+    startCommand: npm start
+
+    healthCheckPath: /api/v1/health
+    autoDeployTrigger: commit
+
+    envVars:
+      - key: NODE_VERSION
+        value: 22.23.4
+
+      - key: NODE_ENV
+        value: production
+
+      # Không tải binary MongoDB (~100MB) vì chỉ cần cho test tích hợp.
+      - key: MONGOMS_DISABLE_POSTINSTALL
+        value: "true"
+
+      # Render tự cấp PORT, không cần đặt.
+
+      # --- MongoDB (MongoDB Atlas) ---
+      # Connection string dạng:
+      # mongodb+srv://<user>:<password>@<cluster>.mongodb.net/smart_energy?retryWrites=true&w=majority
+      - key: MONGO_URI
+        sync: false
+      - key: MONGO_DB
+        value: smart_energy
+
+      # --- JWT ---
+      # Render tự sinh chuỗi ngẫu nhiên base64 256-bit.
+      - key: JWT_SECRET
+        generateValue: true
+
+      # --- Tài khoản seed ---
+      - key: ADMIN_USERNAME
+        value: admin
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: DEMO_PASSWORD
+        sync: false
+      - key: SEED_DEMO
+        value: "true"
+
+      # --- MQTT ---
+      # Dùng broker cloud, ví dụ mqtts://<host>:8883
+      - key: MQTT_URL
+        sync: false
+      - key: MQTT_USERNAME
+        sync: false
+      - key: MQTT_PASSWORD
+        sync: false
+      - key: SIM_MQTT_PASSWORD
+        sync: false
+
+      # --- Telegram (tuỳ chọn) ---
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+
+      # --- Chế độ demo ---
+      - key: SIM_MODE
+        value: normal
+      - key: SIM_ACK_MODE
+        value: normal
