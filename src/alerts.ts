@@ -95,9 +95,12 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
     const received = new Date(sample.receivedAt || sample.thoi_gian_do);
     const measured = new Date(sample.thoi_gian_do);
     const maxGap = device.chu_ky_gui * 5000;
-    // Backfilled telemetry is not evidence of current recovery.
+    // Backfilled telemetry is not evidence of current recovery. A sample
+    // measured long before it was received is a replay, not a live reading,
+    // so it must not advance the incident state either.
     if (!Number.isFinite(+measured) || !Number.isFinite(+received) ||
       +measured - +received > MAX_CLOCK_AHEAD_MS ||
+      +received - +measured > MAX_SAMPLE_DELAY_MS ||
       Date.now() - +received > MAX_SAMPLE_DELAY_MS) return;
     for (const rule of rules) {
       checkLease();

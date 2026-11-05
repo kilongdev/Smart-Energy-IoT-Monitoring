@@ -150,7 +150,19 @@ export class Telemetry
     const updated = await this.db
       .collection('devices')
       .findOneAndUpdate(
-        { _id: device._id },
+        {
+          _id: device._id,
+          $or: [
+            {
+              'latest.thoi_gian_do': {
+                $lt: row.thoi_gian_do,
+              },
+            },
+            {
+              latest: { $exists: false },
+            },
+          ],
+        },
         {
           $set: {
             latest: {
