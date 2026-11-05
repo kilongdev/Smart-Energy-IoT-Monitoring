@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Smart Energy IoT Monitoring
 
 Smart Energy & Equipment IoT Monitoring Platform for Campus & Buildings.
@@ -29,7 +28,6 @@ Smart-Energy-IoT-Monitoring/
 ├── .gitignore
 ├── README.md
 └── docker-compose.yml
-=======
 # Smart Energy IoT
 
 Dự án theo báo cáo của Nhóm 19 – 1A: giám sát điện năng tòa nhà, cảnh báo và điều khiển thiết bị. Backend **NestJS 11 + MongoDB**, giao diện **React + ECharts**, truyền dữ liệu **MQTT**, cập nhật **Socket.IO**.
@@ -233,4 +231,3 @@ Nếu cổng 3000 bị chiếm, đổi `PORT=3001` trong `.env`, chạy `docker 
 - MongoDB time series indexes: https://www.mongodb.com/docs/manual/core/timeseries/timeseries-index/
 
 `package-lock.json` khóa phiên bản package dùng trong bản bàn giao. Không chứa `.env`, mật khẩu thật hoặc `node_modules` trong gói mã nguồn.
->>>>>>> khang
