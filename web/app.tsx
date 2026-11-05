@@ -55,24 +55,12 @@ function Icon({ name }: { name: string }) {
   );
 }
 function Badge({ value }: { value: any }) {
-  const display =
-    value === true
-      ? 'Online'
-      : value === false
-        ? 'Offline'
-        : alertSeverityLabels[value] ||
-          alertDeliveryLabels[value] ||
-          value;
-  let cls = [
-    'Thành công',
-    'Đã xử lý',
-    'Đã gửi',
-    'Đang bật',
-    'Đã kết thúc',
-    'LOW',
-    'Thấp',
-    true,
-  ].includes(value)
+  const labels: Record<string, string> = {
+    LOW: 'Thấp',
+    MEDIUM: 'Trung bình',
+    HIGH: 'Cao',
+  };
+  let cls = ['Thành công', 'Đã xử lý', 'LOW', true].includes(value)
     ? 'good'
     : [
           'Thất bại',
@@ -95,7 +83,13 @@ function Badge({ value }: { value: any }) {
   }
   return (
     <span className={'badge ' + cls}>
-      {value === 'NO_DATA' ? 'Chưa có dữ liệu' : display}
+      {value === true
+        ? 'Online'
+        : value === false
+          ? 'Offline'
+          : value === 'NO_DATA'
+            ? 'Chưa có dữ liệu'
+            : labels[value] || value}
     </span>
   );
 }
@@ -186,6 +180,31 @@ function Chart({ option, height = 290 }: { option: any; height?: number }) {
     };
   }, [option]);
   return <div ref={el} style={{ height }} />;
+}
+const alertMetricLabels: Record<string, string> = {
+  cong_suat_w: 'Công suất',
+  dien_ap_v: 'Điện áp',
+  dong_dien_a: 'Dòng điện',
+  nhiet_do_c: 'Nhiệt độ',
+};
+const alertMetricUnits: Record<string, string> = {
+  cong_suat_w: 'W',
+  dien_ap_v: 'V',
+  dong_dien_a: 'A',
+  nhiet_do_c: '°C',
+};
+const alertOperatorLabels: Record<string, string> = {
+  '>': 'lớn hơn',
+  '<': 'nhỏ hơn',
+  '>=': 'lớn hơn hoặc bằng',
+  '<=': 'nhỏ hơn hoặc bằng',
+  '=': 'bằng',
+};
+function formatAlertCondition(rule: Row) {
+  const metric = alertMetricLabels[rule.chi_so_can_do] || rule.chi_so_can_do;
+  const unit = alertMetricUnits[rule.chi_so_can_do] || '';
+  const operator = alertOperatorLabels[rule.toan_tu] || rule.toan_tu;
+  return `${metric} (${unit}) ${operator} ${fmt(rule.gia_tri_nguong)} ${unit}`.trim();
 }
 function Login({ done }: { done: (u: Row) => void }) {
   const [name, setName] = useState('admin'),
@@ -1243,9 +1262,13 @@ function AlertPage({
             onChange={(e) => setSeverity(e.target.value)}
           >
             <option value="">Tất cả mức độ</option>
-            {['LOW', 'MEDIUM', 'HIGH'].map((s) => (
-              <option key={s} value={s}>
-                {alertSeverityLabel(s)}
+            {[
+              ['LOW', 'Thấp'],
+              ['MEDIUM', 'Trung bình'],
+              ['HIGH', 'Cao'],
+            ].map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
               </option>
             ))}
           </select>
@@ -1330,8 +1353,8 @@ function AlertPage({
             'Thao tác',
           ]}
           rows={rules.map((r: Row) => [
-            alertRuleName(r),
-            `${alertMetricLabel(r.chi_so_can_do)} ${r.toan_tu} ${r.gia_tri_nguong}`,
+            r.ten_quy_tac,
+            formatAlertCondition(r),
             r.thoi_gian_duy_tri + ' giây',
             r.cooldown + ' giây',
             <Badge value={r.bat ? 'Đang bật' : 'Tạm dừng'} />,
@@ -1395,7 +1418,7 @@ function CatalogPage({ lists, edit, run }: any) {
                 ({
                   ten_toa_nha: 'Tên tòa nhà',
                   dia_chi: 'Địa chỉ',
-                  so_tang: 'Số tầng',
+                  so_tang: 'Tầng thứ',
                   ma_toa_nha: 'Tòa nhà',
                   ten_phong: 'Tên phòng',
                   loai_phong: 'Loại phòng',
@@ -1455,6 +1478,17 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
       label: String(r[label]),
     }));
   const values = (a: string[]) => a.map((v) => ({ value: v, label: v }));
+  const metricLabels: Record<string, string> = {
+    cong_suat_w: 'Công suất (W)',
+    dien_ap_v: 'Điện áp (V)',
+    dong_dien_a: 'Dòng điện (A)',
+    nhiet_do_c: 'Nhiệt độ (°C)',
+  };
+  const severityLabels: Record<string, string> = {
+    LOW: 'Thấp',
+    MEDIUM: 'Trung bình',
+    HIGH: 'Cao',
+  };
   const deviceField = {
     key: 'ma_thiet_bi',
     label: 'Thiết bị',
@@ -1472,7 +1506,7 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
         options: opts('buildings', 'ten_toa_nha'),
         fixed: true,
       },
-      { key: 'so_tang', label: 'Số tầng', type: 'number', min: -10, max: 200 },
+      { key: 'so_tang', label: 'Tầng thứ', type: 'number', min: -10, max: 200 },
     ],
     rooms: [
       {
@@ -1560,13 +1594,12 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
       {
         key: 'chi_so_can_do',
         label: 'Thông số',
-        options: values([
+        options: [
           'cong_suat_w',
           'dien_ap_v',
           'dong_dien_a',
           'nhiet_do_c',
-          'dong_ro_ma',
-        ]),
+        ].map((v) => ({ value: v, label: metricLabels[v] })),
       },
       {
         key: 'toan_tu',
@@ -1578,7 +1611,8 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
         key: 'khung_gio_ap_dung',
         label: 'Khung giờ áp dụng (tùy chọn)',
         optional: true,
-        hint: '22:00-06:00; để trống để áp dụng cả ngày',
+        type: 'time-window',
+        hint: 'Để trống cả hai ô để áp dụng cả ngày',
       },
       {
         key: 'thoi_gian_duy_tri',
@@ -1597,7 +1631,10 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
       {
         key: 'muc_do',
         label: 'Mức độ',
-        options: values(['LOW', 'MEDIUM', 'HIGH']),
+        options: ['LOW', 'MEDIUM', 'HIGH'].map((v) => ({
+          value: v,
+          label: severityLabels[v],
+        })),
       },
       { key: 'bat', label: 'Bật quy tắc', type: 'checkbox' },
     ],
@@ -1637,12 +1674,29 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
       loai_phong: 'CLASSROOM',
       vai_tro: 'NguoiXem',
     },
+    khung_gio_bat_dau: String(record?.khung_gio_ap_dung || '').split('-')[0] || '',
+    khung_gio_ket_thuc: String(record?.khung_gio_ap_dung || '').split('-')[1] || '',
     ...record,
   }));
+  const [validationError, setValidationError] = useState('');
   async function submit(e: any) {
     e.preventDefault();
+    setValidationError('');
     const payload: Row = {};
     for (const f of definitions[kind]) {
+      if (f.type === 'time-window') {
+        const start = form.khung_gio_bat_dau || '';
+        const end = form.khung_gio_ket_thuc || '';
+        if (start !== '' && end !== '') {
+          payload.khung_gio_ap_dung = `${start}-${end}`;
+        } else if (start !== '' || end !== '') {
+          setValidationError('Vui lòng chọn đủ giờ bắt đầu và giờ kết thúc.');
+          return;
+        } else if (record) {
+          payload.khung_gio_ap_dung = null;
+        }
+        continue;
+      }
       let v = form[f.key];
       if (f.optional && (v === '' || v === undefined)) {
         if (record && f.key === 'khung_gio_ap_dung') payload[f.key] = null;
@@ -1689,6 +1743,32 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
                     />
                     {f.label}
                   </>
+                ) : f.type === 'time-window' ? (
+                  <div className="time-window">
+                    <input
+                      type="time"
+                      aria-label="Giờ bắt đầu"
+                      value={form.khung_gio_bat_dau || ''}
+                      onChange={(e) =>
+                        setForm({
+                          ...form,
+                          khung_gio_bat_dau: e.target.value,
+                        })
+                      }
+                    />
+                    <span>đến</span>
+                    <input
+                      type="time"
+                      aria-label="Giờ kết thúc"
+                      value={form.khung_gio_ket_thuc || ''}
+                      onChange={(e) =>
+                        setForm({
+                          ...form,
+                          khung_gio_ket_thuc: e.target.value,
+                        })
+                      }
+                    />
+                  </div>
                 ) : (
                   <>
                     {f.label}
@@ -1742,7 +1822,9 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
               </label>
             ))}
           </div>
-          {error && <div className="error">{error}</div>}
+          {(validationError || error) && (
+            <div className="error">{validationError || error}</div>
+          )}
           <div className="modal-actions">
             <button type="button" onClick={close}>
               Hủy
