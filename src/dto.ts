@@ -8,6 +8,7 @@ import {
   IsISO8601,
   IsNotEmpty,
   IsNumber,
+  IsObject,
   IsOptional,
   IsString,
   IsUUID,
@@ -147,8 +148,18 @@ export class TelemetryDto {
   @IsUUID()
   ma_thiet_bi!: string;
 
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  ma_phong?: string;
+
   @IsISO8601({ strict: true })
   thoi_gian_do!: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  uptime_s?: number;
 
   @IsNumber()
   @Min(0)
@@ -170,8 +181,40 @@ export class TelemetryDto {
   @Max(200)
   nhiet_do_c!: number;
 
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(1000)
+  dong_ro_ma?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  dien_nang_kwh?: number;
+
   @IsBoolean()
   trang_thai_relay!: boolean;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(10_000_000)
+  dinh_muc_w?: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  che_do_gia_lap?: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(1000)
+  so_thiet_bi_bat?: number;
+
+  @IsOptional()
+  @IsObject()
+  chi_tiet_mo_phong?: Record<string, number>;
 }
 
 export class AckDto {
@@ -207,6 +250,7 @@ export class RuleDto {
     'dien_ap_v',
     'dong_dien_a',
     'nhiet_do_c',
+    'dong_ro_ma',
   ])
   chi_so_can_do!: string;
 

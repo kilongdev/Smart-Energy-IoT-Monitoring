@@ -323,16 +323,11 @@ export class Analytics implements OnApplicationBootstrap, OnModuleDestroy {
       const roomDevices = devices.filter(
         (device) => device.ma_phong === room._id,
       );
+      const gateway = roomDevices[0];
 
-      const onlineDevices = roomDevices.filter((device) =>
-        isOnline(device, now),
-      );
+      const gatewayOnline = gateway ? isOnline(gateway, now) : false;
 
-      const power = onlineDevices.reduce(
-        (total, device) =>
-          total + (device.latest?.cong_suat_w || 0),
-        0,
-      );
+      const power = gatewayOnline ? gateway.latest?.cong_suat_w || 0 : 0;
 
       const ratedPower = roomDevices.reduce(
         (total, device) => total + device.cong_suat_dinh_muc,
@@ -341,7 +336,7 @@ export class Analytics implements OnApplicationBootstrap, OnModuleDestroy {
 
       let warningLevel: string;
 
-      if (onlineDevices.length === 0) {
+      if (!gatewayOnline) {
         warningLevel = 'NO_DATA';
       } else if (power > ratedPower * 0.8) {
         warningLevel = 'HIGH';
@@ -357,8 +352,10 @@ export class Analytics implements OnApplicationBootstrap, OnModuleDestroy {
         ma_tang: room.ma_tang,
         buildingId: room.buildingId,
         tong_cong_suat_w: power,
-        online: onlineDevices.length,
-        total: roomDevices.length,
+        gatewayId: gateway?._id,
+        gatewayName: gateway?.ten_thiet_bi,
+        online: gatewayOnline,
+        total: gateway ? 1 : 0,
         muc_do_canh_bao: warningLevel,
       };
     });
@@ -370,6 +367,8 @@ export class Analytics implements OnApplicationBootstrap, OnModuleDestroy {
         (total, room) => total + room.tong_cong_suat_w,
         0,
       ),
+      onlineRooms: heatmap.filter((room) => room.online).length,
+      totalRooms: heatmap.length,
       online: devices.filter((device) => device.online).length,
       total: devices.length,
       serverTime: new Date(),
