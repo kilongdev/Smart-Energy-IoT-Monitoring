@@ -5,6 +5,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { Db, MongoClient } from 'mongodb';
+import { prepareAlertStorage } from './alert-policy';
 
 @Injectable()
 export class Database implements OnModuleInit, OnModuleDestroy {
@@ -102,6 +103,8 @@ export class Database implements OnModuleInit, OnModuleDestroy {
     for (const [collectionName, key, options] of indexes) {
       await this.collection(collectionName).createIndex(key, options);
     }
+
+    await prepareAlertStorage(this);
 
     this.log.log('MongoDB đã kết nối; chỉ mục và TTL đã sẵn sàng');
   }

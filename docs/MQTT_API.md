@@ -80,11 +80,12 @@ Tất cả dưới `/api/v1`; trừ login/health, cần header `Authorization: B
 | GET analytics/energy?from=&to=&period=day | Các vai trò |
 | GET/POST alerts/rules; PATCH alerts/rules/:id | Admin/Quản lý |
 | GET alerts/history?ma_phong=&muc_do=&trang_thai=&from=&to= | Admin/Quản lý |
-| PATCH alerts/history/:id/status | Admin/Quản lý |
 | POST control/devices/:id/switch | Admin/Quản lý |
 | GET control/logs, control/runs | Admin/Quản lý |
 | GET/POST control/schedules; PATCH/DELETE control/schedules/:id | Admin/Quản lý |
 | GET audit | Admin |
+
+Trạng thái sự cố do hệ thống cập nhật từ telemetry; endpoint PATCH `alerts/history/:id/status` đã bị gỡ. Quy tắc hỗ trợ `thoi_gian_phuc_hoi` (1–86400 giây, mặc định 30). Khoảng nhắc hiệu lực tối thiểu 300 giây. Xem [vòng đời cảnh báo](ALERT_LIFECYCLE.md).
 
 Socket.IO nhận `{auth:{token:access_token}}`. Sự kiện `telemetry` cho các vai trò trong cùng tòa nhà; `alert` và `command` chỉ Admin/Quản lý. Không truyền JWT trong URL.
 

@@ -40,7 +40,9 @@ export class Control
   async onApplicationBootstrap() {
     // Persisted pending commands survive process restarts and expire using their original deadline.
     this.timer = setInterval(() => {
-      this.expire().catch((error) => {
+      this.reconcileFromTelemetry()
+        .then(() => this.expire())
+        .catch((error) => {
         this.log.error(error.message);
       });
     }, 250);
@@ -218,16 +220,21 @@ export class Control
     const time = new Date(dto.thoi_gian);
     const now = new Date();
 
-    if (
-      +time > +now + 5000 ||
-      +time < +command.thoi_gian_thuc_hien - 1000
-    ) {
+    if (+time > +now + 5000) {
       await this.db.audit('INVALID_ACK', {
         reason: 'Thời điểm ACK không hợp lệ',
       });
 
       return;
     }
+
+    // The command id and authenticated MQTT topic identify the command.
+    // A device may have an unsynchronised clock, so an old device timestamp
+    // must not turn a real relay acknowledgement into a false failure.
+    const stateTime =
+      +time >= +command.thoi_gian_thuc_hien - 1000
+        ? time
+        : now;
 
     if (+now > +command.deadline) {
       await this.fail(command, 'Hết 5 giây chờ ACK');
@@ -283,14 +290,14 @@ export class Control
         _id: device._id,
         latestCommandId: command._id,
         $or: [
-          { lastRelayAt: { $lte: time } },
+        { lastRelayAt: { $lte: stateTime } },
           { lastRelayAt: { $exists: false } },
         ],
       },
       {
         $set: {
           trang_thai_relay: dto.trang_thai_relay,
-          lastRelayAt: time,
+        lastRelayAt: stateTime,
           lastSeen: now,
         },
       },
@@ -342,6 +349,59 @@ export class Control
       }
     } finally {
       this.busy = false;
+    }
+  }
+
+  private async reconcileFromTelemetry() {
+      const commands = await this.db
+        .collection('commands')
+        .find({
+          trang_thai: { $in: ['Đang chờ', 'Đã gửi'] },
+          thoi_gian_thuc_hien: { $lte: new Date() },
+        })
+        .limit(50)
+        .toArray();
+
+      for (const command of commands) {
+        const device = await this.db
+          .collection('devices')
+          .findOne({ _id: command.ma_thiet_bi });
+
+        if (
+          !device ||
+          !device.pendingCommand ||
+          device.pendingCommand !== command._id ||
+          device.lastSeen < command.thoi_gian_thuc_hien ||
+          device.trang_thai_relay !== (command.hanh_dong === 'Bật')
+        ) {
+          continue;
+        }
+
+        const result = await this.db
+          .collection('commands')
+          .findOneAndUpdate(
+            {
+              _id: command._id,
+              trang_thai: { $in: ['Đang chờ', 'Đã gửi'] },
+            },
+            {
+              $set: {
+                trang_thai: 'Thành công',
+                loi: '',
+                completedAt: new Date(),
+                confirmedBy: 'telemetry',
+              },
+            },
+            { returnDocument: 'after' },
+          );
+
+        if (result) {
+          await this.db.collection('devices').updateOne(
+            { _id: device._id, pendingCommand: command._id },
+            { $set: { pendingCommand: null } },
+          );
+          this.events.send(device.buildingId, 'command', result, true);
+      }
     }
   }
 }

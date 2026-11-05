@@ -1,5 +1,6 @@
 import 'reflect-metadata';import {test,before,after} from 'node:test';import assert from 'node:assert/strict';import {MongoMemoryServer} from 'mongodb-memory-server';import {createServer,Server} from 'node:net';import mqtt,{MqttClient} from 'mqtt';import {randomUUID} from 'node:crypto';
 import {createApp} from '../src/app';import {Database} from '../src/database';import {Mqtt} from '../src/mqtt';import {Control} from '../src/control';import {Schedules} from '../src/schedules';import {Analytics} from '../src/analytics';import {IDS,localClock,hourStart} from '../src/domain';
+import {Alerts} from '../src/alerts';
 let mongo:MongoMemoryServer,app:any,db:Database,broker:any,server:Server,device:MqttClient,base:string,admin:string,manager:string,viewer:string;
 const wait=(ms:number)=>new Promise(r=>setTimeout(r,ms));
 async function until(fn:()=>Promise<any>,timeout=8000){const start=Date.now();while(Date.now()-start<timeout){const result=await fn();if(result)return result;await wait(40);}throw new Error('Timeout waiting for condition');}
@@ -50,14 +51,46 @@ test('MQTT nhận payload thật và từ chối topic giả mạo',async()=>{
  assert.equal(await db.collection('telemetry').countDocuments({ma_thiet_bi:IDS.device,thoi_gian_do:new Date(invalid.thoi_gian_do)}),0);
 });
 test('Debounce, cooldown, snapshot và vòng đời cảnh báo',async()=>{
- const r=await request('alerts/rules','POST',{ma_thiet_bi:IDS.device,ten_quy_tac:'Quá tải',chi_so_can_do:'cong_suat_w',toan_tu:'>',gia_tri_nguong:1000,thoi_gian_duy_tri:2,cooldown:60},manager);assert.equal(r.status,201);
+ const r=await request('alerts/rules','POST',{ma_thiet_bi:IDS.device,ten_quy_tac:'Quá tải',chi_so_can_do:'cong_suat_w',toan_tu:'>',gia_tri_nguong:1000,thoi_gian_duy_tri:2,thoi_gian_phuc_hoi:1,cooldown:300},manager);assert.equal(r.status,201);
  await ingest(1500,new Date(Date.now()-4000));assert.equal(await db.collection('alerts').countDocuments(),0);
- await ingest(1600);const a=await db.collection('alerts').findOne({ma_quy_tac:r.body._id});assert.ok(a);assert.equal(a.trang_thai,'Mới');assert.equal(a.snapshot.sample.cong_suat_w,1600);
+ await wait(2100);await ingest(1600);const a=await db.collection('alerts').findOne({ma_quy_tac:r.body._id});assert.ok(a);assert.equal(a.trang_thai,'Đang theo dõi');assert.equal(a.snapshot.sample.cong_suat_w,1600);
  await wait(5);await ingest(1700);assert.equal(await db.collection('alerts').countDocuments({ma_quy_tac:r.body._id}),1);
- assert.equal((await request(`alerts/history/${a._id}/status`,'PATCH',{trang_thai:'Đã xử lý'},manager)).status,409);
- assert.equal((await request(`alerts/history/${a._id}/status`,'PATCH',{trang_thai:'Đã xác nhận'},manager)).status,200);
- assert.equal((await request(`alerts/history/${a._id}/status`,'PATCH',{trang_thai:'Đã xử lý',ghi_chu:'Kiểm tra xong'},manager)).status,200);
+ assert.equal((await request(`alerts/history/${a._id}/status`,'PATCH',{trang_thai:'Đã phục hồi'},manager)).status,404);
+ assert.equal((await request(`alerts/history/${a._id}/status`,'PATCH',{trang_thai:'Đã xác nhận'},admin)).status,404);
+ await wait(5);await ingest(500);assert.equal((await db.collection('alerts').findOne({_id:a._id}))!.tinh_trang,'Đang phục hồi');
+ await wait(1100);await ingest(500);const resolved=await db.collection('alerts').findOne({_id:a._id});
+ assert.equal(resolved!.trang_thai,'Đã phục hồi');assert.equal(resolved!.resolvedBy,'system');
+ assert.equal(resolved!.recoveryNotification.notificationKind,'recovered');
+ const byId=await request('alerts/history?id='+a._id,'GET',undefined,manager);assert.equal(byId.body.length,1);assert.equal(byId.body[0]._id,a._id);
+ assert.equal((await request('alerts/history?id='+a._id,'GET',undefined,viewer)).status,403);
  await request('alerts/rules/'+r.body._id,'PATCH',{bat:false},manager);
+});
+test('MQTT quá tải tạo cảnh báo và gửi Telegram tới chat cấu hình',async()=>{
+ const r=await request('alerts/rules','POST',{ma_thiet_bi:IDS.device,ten_quy_tac:'Telegram quá tải',chi_so_can_do:'cong_suat_w',toan_tu:'>',gia_tri_nguong:1000,thoi_gian_duy_tri:0,thoi_gian_phuc_hoi:1,cooldown:300},manager);assert.equal(r.status,201);
+ const originalFetch=globalThis.fetch;const sent:any[]=[];
+ process.env.TELEGRAM_BOT_TOKEN='123:test-only';process.env.TELEGRAM_CHAT_ID='-100123';
+ globalThis.fetch=async(input:any,options:any)=>{
+  if(String(input).startsWith('https://api.telegram.org/')){sent.push(JSON.parse(options.body));return new Response(JSON.stringify({ok:true,result:{message_id:123}}),{status:200});}
+  return originalFetch(input,options);
+ };
+ try {
+  const msg=sample(1800);await device.publishAsync('campus/demo/device1/telemetry',JSON.stringify(msg),{qos:1});
+  const alert=await until(()=>db.collection('alerts').findOne({ma_quy_tac:r.body._id}));
+  await app.get(Alerts).notifications();
+  const delivered=await until(()=>db.collection('alerts').findOne({_id:alert._id,trang_thai_gui:'Thành công'}));
+  assert.equal(delivered.telegramMessageId,123);
+  const detection=sent.filter(s=>s.text.includes(alert._id));assert.equal(detection.length,1);
+  assert.equal(detection[0].chat_id,'-100123');assert.match(detection[0].text,/1800 W/);assert.match(detection[0].text,/Phòng A101/);
+  await device.publishAsync('campus/demo/device1/telemetry',JSON.stringify(sample(500)),{qos:1});
+  await until(()=>db.collection('alerts').findOne({_id:alert._id,tinh_trang:'Đang phục hồi'}));
+  await wait(1100);await device.publishAsync('campus/demo/device1/telemetry',JSON.stringify(sample(500)),{qos:1});
+  const recovered=await until(()=>db.collection('alerts').findOne({_id:alert._id,'recoveryNotification.trang_thai_gui':'Thành công'}));
+  assert.equal(recovered.resolvedBy,'system');assert.equal(recovered.trang_thai,'Đã phục hồi');
+  assert.equal(sent.filter(s=>s.text.includes(alert._id)&&s.text.includes('THÔNG SỐ ĐÃ PHỤC HỒI')).length,1);
+ } finally {
+  globalThis.fetch=originalFetch;process.env.TELEGRAM_BOT_TOKEN='';process.env.TELEGRAM_CHAT_ID='';
+  await request('alerts/rules/'+r.body._id,'PATCH',{bat:false},manager);
+ }
 });
 test('Lệnh 202 không tự thành công; ACK đúng mới xác nhận',async()=>{
  await ingest();const r=await request(`control/devices/${IDS.device}/switch`,'POST',{hanh_dong:'Tắt'},manager);assert.equal(r.status,202);assert.equal(r.body.trang_thai,'Đang chờ');
@@ -75,7 +108,7 @@ test('ACK sai mã bị bỏ qua, không có ACK thì timeout; ACK muộn không 
  await until(()=>db.collection('commands').findOne({_id:r.body._id,lateAck:{$exists:true}}));assert.equal((await db.collection('commands').findOne({_id:r.body._id}))!.trang_thai,'Thất bại');
 });
 test('Thiết bị offline ghi thất bại, không publish lệnh thành công giả',async()=>{
- await db.collection('devices').updateOne({_id:IDS.device},{$set:{lastSeen:new Date(Date.now()-16000)}});
+ await db.collection('devices').updateOne({_id:IDS.device},{$set:{lastSeen:new Date(Date.now()-26000)}});
  const r=await request(`control/devices/${IDS.device}/switch`,'POST',{hanh_dong:'Tắt'},manager);assert.equal(r.body.trang_thai,'Thất bại');assert.match(r.body.loi,/offline/);
 });
 test('Lịch đến giờ chỉ tạo một lần chạy, lịch tắt không chạy và xung đột bị chặn',async()=>{

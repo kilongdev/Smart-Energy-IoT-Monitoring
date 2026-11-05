@@ -25,7 +25,6 @@ import { Catalog } from './catalog';
 import { Control } from './control';
 import { Database } from './database';
 import {
-  AlertStateDto,
   HistoryDto,
   RangeDto,
   RuleDto,
@@ -191,8 +190,10 @@ export class AlertController {
     chi_so_can_do: 'cong_suat_w',
     toan_tu: '>',
     gia_tri_nguong: 1000,
+    gia_tri_phuc_hoi: 900,
     thoi_gian_duy_tri: 10,
-    cooldown: 60,
+    thoi_gian_phuc_hoi: 30,
+    cooldown: 300,
     muc_do: 'HIGH',
     bat: true,
   })
@@ -215,18 +216,6 @@ export class AlertController {
     return this.alerts.history(request.user, query);
   }
 
-  @Patch('history/:id/status')
-  @body({
-    trang_thai: 'Đã xác nhận',
-    ghi_chu: 'Đã tiếp nhận sự cố',
-  })
-  state(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: AlertStateDto,
-    @Req() request: any,
-  ) {
-    return this.alerts.transition(id, dto, request.user);
-  }
 }
 
 @ApiTags('Điều khiển và hẹn giờ')

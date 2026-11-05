@@ -12,6 +12,7 @@ export class MemoryStore {
   if(!this.tables.has(name))this.tables.set(name,[]);const data=this.tables.get(name)!;
   const check=(row:any,except?:any)=>{if(data.some(x=>x!==except&&x._id===row._id))throw duplicate();
    const keys:Record<string,string[][]>={users:[['tai_khoan']],floors:[['ma_toa_nha','so_tang']],rooms:[['ma_tang','ten_phong']],devices:[['dia_chi_mac'],['chu_de_mqtt']],telemetry:[['ma_thiet_bi','thoi_gian_do']],hourly:[['ma_thiet_bi','hour']]};
+   if(name==='alerts'&&row.isOpen===true&&data.some(x=>x!==except&&x.isOpen===true&&x.ma_thiet_bi===row.ma_thiet_bi&&x.ma_quy_tac===row.ma_quy_tac))throw duplicate();
    for(const fields of keys[name]||[])if(data.some(x=>x!==except&&fields.every(k=>JSON.stringify(x[k])===JSON.stringify(row[k]))))throw duplicate();
   };
   const cursor=(rows:any[])=>{let values=rows;return {sort(s:any){values.sort((a,b)=>{for(const [k,d]of Object.entries(s)){const av=get(a,k),bv=get(b,k);if(av>bv)return Number(d);if(av<bv)return -Number(d);}return 0});return this;},limit(n:number){values=values.slice(0,n);return this;},async toArray(){return clone(values)}}};
@@ -21,6 +22,7 @@ export class MemoryStore {
    createIndex:async()=>{},find,
    async findOne(q:any={},opts:any={}){const cur=find(q);if(opts.sort)cur.sort(opts.sort);return (await cur.limit(1).toArray())[0]||null;},
    async countDocuments(q:any={}){return data.filter(x=>matches(x,q)).length;},
+   async updateMany(q:any,update:any){let matchedCount=0,modifiedCount=0;for(const row of data.filter(x=>matches(x,q))){matchedCount++;const before=JSON.stringify(row);apply(row,update);if(JSON.stringify(row)!==before)modifiedCount++;}return {matchedCount,modifiedCount};},
    async insertOne(row:any){const r=clone(row);r._id??=randomUUID();check(r);data.push(r);return {insertedId:r._id};},
    async updateOne(q:any,update:any,opts:any={}){let row=data.find(x=>matches(x,q));if(!row&&!opts.upsert)return {matchedCount:0};const insert=!row;if(!row){row={_id:typeof q._id==='string'?q._id:randomUUID()};for(const[k,v]of Object.entries(q))if(typeof v!=='object'||v instanceof Date)set(row,k,v);}
     const next=clone(row);apply(next,update,insert);check(next,insert?undefined:row);if(insert)data.push(next);else Object.assign(row,next);return {matchedCount:1,modifiedCount:1};},
