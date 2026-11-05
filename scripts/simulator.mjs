@@ -1,5 +1,5 @@
 import mqtt from 'mqtt';
-const client=mqtt.connect(process.env.MQTT_URL||'mqtt://localhost:1883',{username:'energy_sim',password:process.env.SIM_MQTT_PASSWORD,clientId:'energy-simulator',clean:false,reconnectPeriod:2000});
+const client=mqtt.connect(process.env.MQTT_URL||'mqtt://localhost:1883',{username:process.env.MQTT_USERNAME||'energy_sim',password:process.env.MQTT_PASSWORD||process.env.SIM_MQTT_PASSWORD,clientId:'energy-simulator',clean:false,reconnectPeriod:2000});
 const state=Array.from({length:3},(_,i)=>({id:`44444444-4444-4444-8444-44444444444${4+i}`,topic:`campus/demo/device${i+1}`,relay:true,period:5,last:0,acks:new Map()}));
 client.on('connect',()=>{for(const d of state){client.subscribe(d.topic+'/command',{qos:1});client.subscribe(d.topic+'/config',{qos:1});}console.log('Simulator đã kết nối: 3 thiết bị');});
 client.on('error',e=>console.error('MQTT:',e.message));

@@ -554,7 +554,7 @@ function App() {
                   visibleDevices.filter((d: Row) => d.online).length,
                 )}
                 unit={'/ ' + visibleDevices.length}
-                detail="Offline sau 3 chu kỳ không có dữ liệu"
+                detail="Online khi nhận telemetry; mất dữ liệu quá 3 chu kỳ sẽ Offline"
               />
               <Metric
                 label="ĐIỆN NĂNG TRONG KỲ"

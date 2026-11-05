@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "author": "Smart Energy IoT",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "wokwi-esp32-devkit-v1",
+      "id": "esp",
+      "top": 0,
+      "left": 0,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-led",
+      "id": "relay",
+      "top": -20,
+      "left": 220,
+      "attrs": {
+        "color": "green",
+        "label": "Relay"
+      }
+    },
+    {
+      "type": "wokwi-dht22",
+      "id": "dht",
+      "top": 140,
+      "left": 220,
+      "attrs": {}
+    }
+  ],
+  "connections": [
+    ["esp:D2", "relay:A", "green", []],
+    ["esp:GND.1", "relay:C", "black", []],
+    ["esp:D4", "dht:SDA", "green", []],
+    ["esp:3V3", "dht:VCC", "red", []],
+    ["esp:GND.2", "dht:GND", "black", []]
+  ],
+  "dependencies": {}
+}
