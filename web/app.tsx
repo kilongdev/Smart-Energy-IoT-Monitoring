@@ -35,6 +35,7 @@ function Icon({ name }: { name: string }) {
     dashboard: 'M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z',
     map: 'm3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3z M9 3v15 M15 6v15',
     alert: 'm12 3 10 18H2z M12 9v5 M12 17v1',
+    bell: 'M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9 M10 21h4',
     control: 'M12 2v10 M6 5a9 9 0 1 0 12 0',
     schedule: 'M8 2v4 M16 2v4 M3 10h18 M3 4h18v17H3z M8 14h3 M8 17h6',
     catalog: 'M3 7h18v14H3z M3 7l3-4h12l3 4 M8 12h8',
@@ -60,10 +61,11 @@ function Badge({ value }: { value: any }) {
     MEDIUM: 'Trung bình',
     HIGH: 'Cao',
   };
-  let cls = ['Thành công', 'Đã xử lý', 'LOW', true].includes(value)
+  let cls = ['Thành công', 'Đã phục hồi', 'LOW', true].includes(value)
     ? 'good'
     : [
           'Thất bại',
+          'Thất bại vĩnh viễn',
           'Gửi thất bại',
           'Tạm dừng',
           'HIGH',
@@ -73,12 +75,12 @@ function Badge({ value }: { value: any }) {
         ].includes(value)
       ? 'bad'
       : 'neutral';
-  if (value === 'Đã xác nhận' || value === 'MEDIUM' || value === 'Trung bình') {
+  if (value === 'Đang phục hồi' || value === 'MEDIUM' || value === 'Trung bình') {
     cls = 'warning';
   }
   if (value === 'Đang diễn ra') {
     cls = 'bad';
-  } else if (value === 'Đã kết thúc') {
+  } else if (value === 'Đã kết thúc' || value === 'Thông số đã phục hồi') {
     cls = 'good';
   }
   return (
@@ -112,7 +114,9 @@ const alertDeliveryLabels: Record<string, string> = {
 };
 const alertIncidentLabels: Record<string, string> = {
   'Đang diễn ra': 'Đang diễn ra',
-  'Đã kết thúc': 'Đã kết thúc',
+  'Đang phục hồi': 'Đang phục hồi',
+  'Đã kết thúc': 'Thông số đã phục hồi',
+  'Đã gộp': 'Đã gộp cảnh báo trùng',
 };
 function alertMetricLabel(metric: string) {
   return alertMetricLabels[metric] || metric;
@@ -181,17 +185,12 @@ function Chart({ option, height = 290 }: { option: any; height?: number }) {
   }, [option]);
   return <div ref={el} style={{ height }} />;
 }
-const alertMetricLabels: Record<string, string> = {
-  cong_suat_w: 'Công suất',
-  dien_ap_v: 'Điện áp',
-  dong_dien_a: 'Dòng điện',
-  nhiet_do_c: 'Nhiệt độ',
-};
 const alertMetricUnits: Record<string, string> = {
   cong_suat_w: 'W',
   dien_ap_v: 'V',
   dong_dien_a: 'A',
   nhiet_do_c: '°C',
+  dong_ro_ma: 'mA',
 };
 const alertOperatorLabels: Record<string, string> = {
   '>': 'lớn hơn',
@@ -314,7 +313,7 @@ const titles: Record<string, string> = {
 function App() {
   const [user, setUser] = useState<Row | null>(null),
     [authLoading, setAuthLoading] = useState(true),
-    [tab, setTab] = useState('dashboard'),
+    [tab, setTab] = useState(new URLSearchParams(location.search).has('alert') ? 'alert' : 'dashboard'),
     [connected, setConnected] = useState(false);
   const [data, setData] = useState<Row>({
       devices: [],
@@ -337,6 +336,9 @@ function App() {
     [schedules, setSchedules] = useState<Row[]>([]),
     [logs, setLogs] = useState<Row[]>([]);
   const [notice, setNotice] = useState(''),
+    [noticeTone, setNoticeTone] = useState<'success' | 'error'>('success'),
+    [commandPopup, setCommandPopup] = useState<Row | null>(null),
+    [bellOpen, setBellOpen] = useState(false),
     [error, setError] = useState(''),
     [dialog, setDialog] = useState<any>(null),
     [saving, setSaving] = useState(false);
@@ -389,7 +391,10 @@ function App() {
           api('control/schedules'),
           api('control/logs'),
         ]);
-        setAlerts(a);
+        const linkedId = new URLSearchParams(location.search).get('alert');
+        const linked = linkedId && !a.some((item: Row) => item._id === linkedId)
+          ? await api('alerts/history?id=' + encodeURIComponent(linkedId)) : [];
+        setAlerts([...a, ...linked]);
         setRules(r);
         setSchedules(s);
         setLogs(l);
@@ -413,9 +418,13 @@ function App() {
       refreshTimer.current = setTimeout(load, 250);
     };
     socket.on('telemetry', update);
-    socket.on('command', update);
+    socket.on('command', (command: any) => {
+      showCommandResult(command);
+      update();
+    });
     socket.on('alert', (e: any) => {
-      setNotice('Cảnh báo mới: ' + (e.message || 'Trạng thái đã cập nhật'));
+      setNoticeTone('success');
+      setNotice(e.message || 'Trạng thái cảnh báo đã cập nhật');
       update();
     });
     return () => {
@@ -478,6 +487,48 @@ function App() {
       return () => clearTimeout(t);
     }
   }, [notice]);
+  function showCommandResult(command: Row) {
+    setCommandPopup(command);
+    if (command.trang_thai === 'Thành công') {
+      setNoticeTone('success');
+      setNotice(`Lệnh ${command.hanh_dong} đã thực hiện thành công`);
+    } else if (command.trang_thai === 'Thất bại') {
+      setNoticeTone('error');
+      setNotice(
+        `Lệnh ${command.hanh_dong} thất bại: ${
+          command.loi || 'Thiết bị không xác nhận được lệnh'
+        }`,
+      );
+    }
+  }
+  function watchCommand(command: Row) {
+    const commandId = command._id || command.ma_lenh;
+    if (!commandId || !command.ma_lenh) return;
+
+    let attempts = 0;
+    const poll = async () => {
+      if (attempts++ >= 12) return;
+      try {
+        const logs = await api('control/logs');
+        const current = logs.find((item: Row) => item._id === commandId);
+        if (
+          current?.trang_thai === 'Thành công' ||
+          current?.trang_thai === 'Thất bại'
+        ) {
+          showCommandResult(current);
+          await load();
+          return;
+        }
+      } catch (error: any) {
+        if (attempts >= 12) {
+          setError(error.message || 'Không thể kiểm tra kết quả lệnh');
+          return;
+        }
+      }
+      setTimeout(poll, 500);
+    };
+    setTimeout(poll, 500);
+  }
   async function change(
     path: string,
     method: string,
@@ -488,11 +539,21 @@ function App() {
     setError('');
     try {
       const result = await api(path, method, payload);
+      if (path.includes('/switch')) {
+        setCommandPopup({
+          ...result,
+          trang_thai: 'Đang chờ',
+        });
+      }
+      setNoticeTone(result.trang_thai === 'Thất bại' ? 'error' : 'success');
       setNotice(
         result.trang_thai === 'Thất bại'
           ? 'Lệnh thất bại: ' + result.loi
           : message,
       );
+      if (path.includes('/switch/') || path.includes('/switch')) {
+        watchCommand(result);
+      }
       setDialog(null);
       await load();
       return result;
@@ -514,6 +575,19 @@ function App() {
     .reduce((s: number, d: Row) => s + (d.latest?.cong_suat_w || 0), 0);
   const selected = visibleDevices.find((d: Row) => d._id === deviceId);
   const selectedOnline = !!selected?.online;
+  const notifications = [
+    ...alerts
+      .filter((item) => item.tinh_trang !== 'Đã kết thúc')
+      .slice(0, 6)
+      .map((item) => ({
+        id: `alert-${item._id}`,
+        title: item.ten_quy_tac || 'Cảnh báo năng lượng',
+        detail: item.noi_dung_loi || item.tinh_trang || 'Có bất thường cần kiểm tra',
+        time: item.bat_dau_luc || item.createdAt,
+        tone: 'danger',
+      })),
+  ].sort((a, b) => +new Date(b.time || 0) - +new Date(a.time || 0));
+  const notificationCount = notifications.length;
   const chartOption = {
     animation: false,
     tooltip: { trigger: 'axis' },
@@ -568,7 +642,7 @@ function App() {
                 <Icon name={key} />
                 {text}
                 {key === 'alert' &&
-                  alerts.some((a) => a.trang_thai === 'Mới') && (
+                  alerts.some((a) => a.isOpen ?? a.tinh_trang !== 'Đã kết thúc') && (
                     <span className="nav-dot" />
                   )}
               </button>
@@ -627,10 +701,77 @@ function App() {
             >
               API Docs ↗
             </a>
+            <div className="notification-wrap">
+              <button
+                className="notification-button"
+                aria-label="Mở thông báo"
+                aria-expanded={bellOpen}
+                onClick={() => setBellOpen((open) => !open)}
+              >
+                <Icon name="bell" />
+                {notificationCount > 0 && (
+                  <span className="notification-count">
+                    {notificationCount > 9 ? '9+' : notificationCount}
+                  </span>
+                )}
+              </button>
+              {bellOpen && (
+                <div className="notification-menu" role="dialog" aria-label="Thông báo">
+                  <div className="notification-head">
+                    <strong>Thông báo</strong>
+                    <span>{notificationCount} chưa xử lý</span>
+                  </div>
+                  {notifications.length ? (
+                    notifications.map((item) => (
+                      <div className="notification-item" key={item.id}>
+                        <i className={`notification-mark ${item.tone}`} />
+                        <div>
+                          <strong>{item.title}</strong>
+                          <span>{item.detail}</span>
+                          <small>{date(item.time)}</small>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="notification-empty">Chưa có thông báo mới</p>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         </header>
+        {commandPopup && (
+          <div
+            className={`command-popup ${
+              commandPopup.trang_thai === 'Thành công'
+                ? 'success'
+                : commandPopup.trang_thai === 'Thất bại'
+                  ? 'failure'
+                  : 'pending'
+            }`}
+            role="alertdialog"
+            aria-live="assertive"
+          >
+            <strong>
+              {commandPopup.trang_thai === 'Đang chờ'
+                ? 'Đang chờ thiết bị xác nhận'
+                : commandPopup.trang_thai}
+            </strong>
+            <span>
+              Lệnh {commandPopup.hanh_dong}
+              {commandPopup.trang_thai === 'Thất bại' &&
+                `: ${commandPopup.loi || 'Không nhận được xác nhận'}`}
+            </span>
+            <button
+              aria-label="Đóng thông báo điều khiển"
+              onClick={() => setCommandPopup(null)}
+            >
+              ×
+            </button>
+          </div>
+        )}
         {notice && (
-          <div className="notice" role="status">
+          <div className={`notice ${noticeTone}`} role="status">
             {notice}
             <button onClick={() => setNotice('')}>×</button>
           </div>
@@ -833,7 +974,10 @@ function App() {
                       </div>
                     )}
                     <p className="muted small last-reading">
-                      Đo lúc: {date(selected?.latest?.thoi_gian_do)}
+                      Cập nhật lúc: {date(
+                        selected?.latest?.receivedAt ||
+                          selected?.latest?.thoi_gian_do,
+                      )}
                     </p>
                   </>
                 ) : (
@@ -848,7 +992,12 @@ function App() {
                     <div className="offline-divider" />
                     <p className="muted small">
                       Bản đo cuối<br />
-                      <strong>{date(selected?.latest?.thoi_gian_do)}</strong>
+                      <strong>
+                        {date(
+                          selected?.latest?.receivedAt ||
+                            selected?.latest?.thoi_gian_do,
+                        )}
+                      </strong>
                     </p>
                   </div>
                 )}
@@ -1224,10 +1373,10 @@ function AlertPage({
   run,
   saving,
 }: any) {
-  const [status, setStatus] = useState(''),
+  const [focusedAlert, setFocusedAlert] = useState(new URLSearchParams(location.search).get('alert') || ''),
     [severity, setSeverity] = useState(''),
     [room, setRoom] = useState(''),
-    [incidentState, setIncidentState] = useState('active'),
+    [incidentState, setIncidentState] = useState(new URLSearchParams(location.search).has('alert') ? '' : 'active'),
     [since, setSince] = useState('');
   const roomIds = [...new Set<string>(devices.map((d: Row) => d.ma_phong))];
   return (
@@ -1237,24 +1386,24 @@ function AlertPage({
           <div>
             <h2>Sự cố cần theo dõi</h2>
             <p className="muted small">
-              Chỉ hiển thị sự cố đang tồn tại; khi số đo trở lại bình thường,
-              cảnh báo sẽ tự kết thúc và được lưu trong lịch sử
+              Thông số phục hồi khi nằm liên tục trong vùng phục hồi, mặc định 30 giây.
+              Đây là kết luận theo dữ liệu đo, không phải xác nhận an toàn điện.
             </p>
           </div>
         </div>
         <div className="filters">
-          <select value={status} onChange={(e) => setStatus(e.target.value)}>
-            <option value="">Tất cả trạng thái</option>
-            {['Mới', 'Đã xác nhận', 'Đã xử lý'].map((s) => (
-              <option key={s}>{s}</option>
-            ))}
-          </select>
+          {focusedAlert && <button onClick={() => {
+            setFocusedAlert('');
+            const url = new URL(location.href); url.searchParams.delete('alert');
+            history.replaceState(null, '', url);
+          }}>Bỏ lọc mã sự cố</button>}
           <select
             value={incidentState}
             onChange={(e) => setIncidentState(e.target.value)}
           >
-            <option value="active">Đang diễn ra</option>
-            <option value="ended">Lịch sử đã kết thúc</option>
+            <option value="active">Chưa phục hồi hoàn toàn</option>
+            <option value="recovering">Đang phục hồi</option>
+            <option value="ended">Thông số đã phục hồi</option>
             <option value="">Tất cả sự cố</option>
           </select>
           <select
@@ -1296,7 +1445,6 @@ function AlertPage({
             'Nội dung',
             'Mức độ',
             'Tình trạng',
-            'Xử lý',
             'Telegram',
           ]}
           rows={alerts
@@ -1304,9 +1452,10 @@ function AlertPage({
               (a: Row) =>
                 (!incidentState ||
                   (incidentState === 'active'
-                    ? a.tinh_trang !== 'Đã kết thúc'
+                    ? (a.isOpen ?? a.tinh_trang !== 'Đã kết thúc')
+                    : incidentState === 'recovering' ? a.tinh_trang === 'Đang phục hồi'
                     : a.tinh_trang === 'Đã kết thúc')) &&
-                (!status || a.trang_thai === status) &&
+                (!focusedAlert || a._id === focusedAlert) &&
                 (!severity || a.muc_do === severity) &&
                 (!room || a.ma_phong === room) &&
                 (!since || new Date(a.thoi_gian_phat_hien) >= new Date(since)),
@@ -1320,14 +1469,29 @@ function AlertPage({
                 </span>,
               <span className="wrap">
                 {alertMessage(a, devices, roomList)}
+                <small>Mã: {a._id}</small>
+                {a.supersededBy && <small>Đã gộp vào cảnh báo {a.supersededBy}</small>}
                 <small>{a.occurrences} lần ghi nhận</small>
+                <small>Số đo cập nhật: {date(a.lastSeen)}</small>
+                {a.tinh_trang !== 'Đã kết thúc' && a.lastSeen &&
+                  Date.now() - +new Date(a.lastSeen) >
+                    (devices.find((d: Row) => d._id === a.ma_thiet_bi)?.chu_ky_gui || 5) * 5000 &&
+                  <small>Thiếu số đo mới — chưa thể xác nhận phục hồi</small>}
+                {a.monitoringPaused && <small>Quy tắc tạm dừng — chưa xác nhận phục hồi</small>}
+                {a.outsideWindow && a.tinh_trang !== 'Đã kết thúc' && <small>Ngoài khung giờ nhắc; tiếp tục kiểm tra phục hồi</small>}
+                {a.tinh_trang === 'Đang phục hồi' && <small>
+                  Cần ổn định liên tục {a.recoverySeconds || 30} giây; đang chờ mẫu đo xác nhận
+                </small>}
               </span>,
               <Badge value={a.muc_do} />,
               <Badge
                 value={alertIncidentLabels[a.tinh_trang] || 'Đang diễn ra'}
               />,
-              <Badge value={a.trang_thai} />,
-              <Badge value={a.trang_thai_gui} />,
+              <span className="wrap">
+                <small>Cảnh báo / nhắc</small><Badge value={a.trang_thai_gui || 'Chưa gửi'} />
+                {a.recoveryNotification && <><small>Phục hồi</small>
+                  <Badge value={a.recoveryNotification.trang_thai_gui} /></>}
+              </span>,
             ])}
         />
       </section>
@@ -1347,16 +1511,21 @@ function AlertPage({
           heads={[
             'Tên quy tắc',
             'Điều kiện',
+            'Ngưỡng phục hồi',
             'Duy trì',
-            'Cooldown',
+            'Phục hồi',
+            'Nhắc lại',
             'Trạng thái',
             'Thao tác',
           ]}
           rows={rules.map((r: Row) => [
             r.ten_quy_tac,
             formatAlertCondition(r),
+            r.gia_tri_phuc_hoi == null ? 'Theo ngưỡng phát hiện' :
+              `${['>', '>='].includes(r.toan_tu) ? '<' : '>'} ${r.gia_tri_phuc_hoi} ${alertMetricUnits[r.chi_so_can_do] || ''}`,
             r.thoi_gian_duy_tri + ' giây',
-            r.cooldown + ' giây',
+            (r.thoi_gian_phuc_hoi ?? 30) + ' giây',
+            Math.max(r.cooldown || 300, 300) + ' giây',
             <Badge value={r.bat ? 'Đang bật' : 'Tạm dừng'} />,
             <div className="actions">
               <button onClick={() => edit('rules', r)}>Sửa</button>
@@ -1599,6 +1768,7 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
           'dien_ap_v',
           'dong_dien_a',
           'nhiet_do_c',
+          'dong_ro_ma',
         ].map((v) => ({ value: v, label: metricLabels[v] })),
       },
       {
@@ -1607,6 +1777,10 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
         options: values(['>', '<', '>=', '<=', '=']),
       },
       { key: 'gia_tri_nguong', label: 'Ngưỡng', type: 'number', step: 'any' },
+      {
+        key: 'gia_tri_phuc_hoi', label: 'Ngưỡng phục hồi (tùy chọn)', type: 'number', step: 'any', optional: true,
+        hint: 'Cảnh báo cao: phục hồi dưới ngưỡng này. Cảnh báo thấp: phục hồi trên ngưỡng này. Để trống để dùng ngưỡng phát hiện.',
+      },
       {
         key: 'khung_gio_ap_dung',
         label: 'Khung giờ áp dụng (tùy chọn)',
@@ -1622,10 +1796,18 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
         max: 86400,
       },
       {
-        key: 'cooldown',
-        label: 'Khoảng chờ gửi lại (giây)',
+        key: 'thoi_gian_phuc_hoi',
+        label: 'Thời gian ổn định để xác nhận phục hồi (giây)',
         type: 'number',
-        min: 5,
+        min: 1,
+        max: 86400,
+        hint: 'Chỉ kết thúc khi có số đo liên tục trong khoảng cho phép; mặc định 30 giây',
+      },
+      {
+        key: 'cooldown',
+        label: 'Khoảng nhắc sự cố chưa phục hồi (giây)',
+        type: 'number',
+        min: 300,
         max: 604800,
       },
       {
@@ -1664,7 +1846,8 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
       buildingIds: [],
       bat: true,
       thoi_gian_duy_tri: 10,
-      cooldown: 60,
+      thoi_gian_phuc_hoi: 30,
+      cooldown: 300,
       gia_tri_nguong: 1000,
       muc_do: 'HIGH',
       hanh_dong: 'Tắt',
@@ -1677,6 +1860,7 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
     khung_gio_bat_dau: String(record?.khung_gio_ap_dung || '').split('-')[0] || '',
     khung_gio_ket_thuc: String(record?.khung_gio_ap_dung || '').split('-')[1] || '',
     ...record,
+    ...(kind === 'rules' ? { cooldown: Math.max(record?.cooldown || 300, 300) } : {}),
   }));
   const [validationError, setValidationError] = useState('');
   async function submit(e: any) {
@@ -1698,8 +1882,8 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
         continue;
       }
       let v = form[f.key];
-      if (f.optional && (v === '' || v === undefined)) {
-        if (record && f.key === 'khung_gio_ap_dung') payload[f.key] = null;
+      if (f.optional && (v === '' || v === undefined || v === null)) {
+        if (record && ['khung_gio_ap_dung', 'gia_tri_phuc_hoi'].includes(f.key)) payload[f.key] = null;
         continue;
       }
       payload[f.key] =

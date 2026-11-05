@@ -260,6 +260,10 @@ export class RuleDto {
   @IsNumber()
   gia_tri_nguong!: number;
 
+  @ValidateIf((_object, value) => value !== undefined && value !== null)
+  @IsNumber()
+  gia_tri_phuc_hoi?: number | null;
+
   @IsOptional()
   @Matches(/^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/)
   khung_gio_ap_dung?: string;
@@ -269,6 +273,12 @@ export class RuleDto {
   @Min(0)
   @Max(86_400)
   thoi_gian_duy_tri?: number;
+
+  @ValidateIf((_object, value) => value !== undefined)
+  @IsInt()
+  @Min(1)
+  @Max(86_400)
+  thoi_gian_phuc_hoi?: number;
 
   @ValidateIf((_object, value) => value !== undefined)
   @IsInt()
@@ -315,16 +325,6 @@ export class ScheduleDto {
 export class UpdateScheduleDto extends PartialType(ScheduleDto, {
   skipNullProperties: false,
 }) {}
-
-export class AlertStateDto {
-  @IsIn(['Đã xác nhận', 'Đã xử lý'])
-  trang_thai!: string;
-
-  @ValidateIf((_object, value) => value !== undefined)
-  @IsString()
-  @MaxLength(1000)
-  ghi_chu?: string;
-}
 
 export class RangeDto {
   @IsISO8601({ strict: true })

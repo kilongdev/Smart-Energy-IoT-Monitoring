@@ -20,7 +20,7 @@ Các tình huống đã đạt:
 5. CRUD, ràng buộc tham chiếu, PATCH giữ nguyên thuộc tính không gửi; từ chối chu kỳ `null`.
 6. Telemetry hợp lệ, chống trùng timestamp và từ chối dữ liệu sai.
 7. Nhận bản tin qua MQTT thật và chặn topic không thuộc thiết bị.
-8. Debounce, cooldown, snapshot và chuyển trạng thái cảnh báo đúng thứ tự.
+8. Debounce, nhắc lại, snapshot và tự phục hồi theo số đo ổn định; API xác nhận thủ công đã bị gỡ. Kiểm thử bổ sung nằm trong `test/alert-lifecycle.test.ts`.
 9. Lệnh trả 202 đang chờ; ACK đúng mới xác nhận thành công.
 10. ACK sai mã bị bỏ qua; quá hạn thành thất bại; ACK muộn không xóa thất bại.
 11. Thiết bị offline không được ghi thành công giả.

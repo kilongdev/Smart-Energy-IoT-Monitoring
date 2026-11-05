@@ -150,23 +150,12 @@ export class Telemetry
     const updated = await this.db
       .collection('devices')
       .findOneAndUpdate(
-        {
-          _id: device._id,
-          $or: [
-            {
-              'latest.thoi_gian_do': {
-                $lt: row.thoi_gian_do,
-              },
-            },
-            {
-              latest: { $exists: false },
-            },
-          ],
-        },
+        { _id: device._id },
         {
           $set: {
             latest: {
               thoi_gian_do: row.thoi_gian_do,
+              receivedAt: row.receivedAt,
               cong_suat_w: row.cong_suat_w,
               dien_ap_v: row.dien_ap_v,
               dong_dien_a: row.dong_dien_a,
@@ -182,14 +171,14 @@ export class Telemetry
       {
         _id: device._id,
         $or: [
-          { lastRelayAt: { $lte: row.thoi_gian_do } },
+          { lastRelayAt: { $lte: row.receivedAt } },
           { lastRelayAt: { $exists: false } },
         ],
       },
       {
         $set: {
           trang_thai_relay: row.trang_thai_relay,
-          lastRelayAt: row.thoi_gian_do,
+          lastRelayAt: row.receivedAt,
         },
       },
     );

@@ -12,7 +12,8 @@
     "start:dev": "npm run build && node --watch --env-file-if-exists=.env dist/src/main.js",
     "setup": "node scripts/setup.mjs",
     "simulator": "node --env-file-if-exists=.env scripts/simulator.mjs",
-    "test": "npm run build && node --test --test-concurrency=1 dist/test/domain.test.js dist/test/offline.test.js",
+    "test": "npm run build && node --test --test-concurrency=1 dist/test/domain.test.js dist/test/telegram.test.js dist/test/alert-lifecycle.test.js dist/test/offline.test.js",
+    "telegram": "node --env-file-if-exists=.env scripts/telegram.mjs",
     "test:integration": "npm run build && node --test --test-concurrency=1 dist/test/integration.test.js"
   },
   "dependencies": {

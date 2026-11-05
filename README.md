@@ -2,6 +2,10 @@
 
 Smart Energy & Equipment IoT Monitoring Platform for Campus & Buildings.
 
+Mô tả đề tài và yêu cầu gốc: [Đề tài 19](docs/DE-TAI-19.md).
+
+Công nghệ đã chốt: **EMQX** làm MQTT broker và **MongoDB** làm cơ sở dữ liệu.
+
 ## Project Structure
 
 ```text
@@ -66,7 +70,7 @@ Giao diện và API dùng chung cổng, được NestJS phục vụ trong contai
 1. Đăng nhập `admin`, xem **Tổng quan**: số đo, biểu đồ, online/offline. Bộ lọc trên cùng chọn phạm vi tòa nhà.
 2. Mở **Bản đồ nhiệt** để xem công suất theo phòng, tầng. Màu xanh/vàng/đỏ dựa vào tỷ lệ công suất hiện tại trên tổng công suất định mức. Phòng không có thiết bị online hiện màu xám.
 3. Vào **Điều khiển**, bấm **Tắt**. Lệnh hiện đang chờ; khi nhận ACK mới ghi Thành công. Xem kết quả tại **Nhật ký**.
-4. Mở **Cảnh báo**, thêm quy tắc công suất `> 100`, duy trì `10`, cooldown `60`. Giữ thiết bị đang bật; sau đủ mẫu vượt ngưỡng, cảnh báo xuất hiện. Bấm **Xác nhận**, sau đó **Đã xử lý**.
+4. Mở **Cảnh báo**, thêm quy tắc công suất `> 100`, duy trì `10`, phục hồi `30`, nhắc lại `300` giây. Khi vi phạm đủ thời gian, cảnh báo xuất hiện. Cho số đo về khoảng cho phép liên tục 30 giây: hệ thống tự đánh dấu **Đã phục hồi** và gửi tin phục hồi. Không có thao tác xác nhận/xử lý thủ công. Xem [vòng đời cảnh báo](docs/ALERT_LIFECYCLE.md).
 5. Vào **Lịch hẹn giờ**, chọn một giờ ở phía trước thời điểm hiện tại khoảng 1 phút, đúng ngày trong tuần. Lịch dùng giờ Việt Nam. Kiểm tra nhật ký có nguồn **Hẹn giờ**.
 6. Vào **Quản trị** để thêm/sửa/xóa tòa nhà, tầng, phòng, thiết bị và tài khoản. Không xóa đối tượng còn được tham chiếu. Xóa tài khoản được thực hiện bằng khóa tài khoản, giữ lịch sử.
 
@@ -111,6 +115,8 @@ Không dùng đồng thời simulator và ESP32 cho cùng một mã thiết bị
 
 ## 4. Cấu hình Telegram
 
+Hướng dẫn tạo bot, lấy Chat ID và thử cảnh báo ESP32: [docs/TELEGRAM.md](docs/TELEGRAM.md).
+
 Tạo bot bằng BotFather, nhắn `/start` cho bot hoặc thêm bot vào nhóm cần nhận thông báo, rồi điền:
 
 ```dotenv
@@ -119,12 +125,14 @@ TELEGRAM_CHAT_ID=chat_id_cua_ban
 ```
 
 ```powershell
-docker compose up -d --force-recreate api
+docker compose up -d --build --force-recreate api
 ```
 
 Khi cả hai giá trị trống, cảnh báo vẫn lưu trên web và trạng thái gửi là **Chưa cấu hình**, không giả lập gửi thành công. Khi cấu hình hợp lệ, cảnh báo mới/đến kỳ gửi lại sẽ được gửi tới **một Chat ID vận hành chung**. Phiên bản này chưa có kênh Telegram riêng cho từng người dùng hoặc từng tòa nhà; chỉ dùng nhóm nhận được phép biết dữ liệu toàn hệ thống.
 
-Hàng đợi gửi được lưu cùng cảnh báo; worker thử gửi định kỳ 1 giây, timeout HTTP 3 giây. Lỗi gửi có ghi log và thử lại tối đa ba lần cho một lượt thông báo, với khoảng chờ ít nhất 30 giây và không ngắn hơn cooldown. Vi phạm tiếp tục có thể tạo lượt gửi tiếp theo sau cooldown. Cooldown được đặt từ **lần thử gửi/đặt lịch gửi**, kể cả lỗi, để tránh bão thông báo. Khi dịch vụ báo thành công, chỉ có nghĩa Telegram đã chấp nhận yêu cầu, không khẳng định người nhận đã đọc. Email chưa triển khai vì báo cáo đánh dấu là tùy chọn.
+Hàng đợi gửi được lưu cùng cảnh báo; worker kiểm tra mỗi giây, gửi cách nhau ít nhất 3,1 giây trong một tiến trình, timeout HTTP 5 giây. Mỗi lượt thử tối đa ba lần, chờ 30/60 giây giữa các lần thử và không ngắn hơn `retry_after` của Telegram. Tin **phát hiện**, **nhắc sự cố chưa phục hồi** và **đã xử lý tự động** được phân biệt rõ; nhắc ít nhất cách nhau 5 phút. Phục hồi cần số đo bình thường liên tục (mặc định 30 giây), không cần người dùng xác nhận. Tin phục hồi có hàng đợi riêng trong cùng bản ghi để không bị lượt gửi cũ ghi đè. **Thành công** có nghĩa Telegram đã chấp nhận tin, không khẳng định người nhận đã đọc. Email chưa triển khai.
+
+Sau khi build, chạy `npm.cmd run telegram -- chats` để tra Chat ID, `npm.cmd run telegram -- check` để kiểm tra cấu hình hoặc `npm.cmd run telegram -- test` để gửi tin thử.
 
 ## 5. Chạy backend ngoài Docker để sửa code
 
