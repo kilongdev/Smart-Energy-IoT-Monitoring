@@ -11,6 +11,6 @@ test('Điện năng tính theo timestamp, cắt ở biên giờ, không nối kh
  assert.ok(Math.abs(energyBetween(rows,0,10000,15000).kwh-10000/3600000)<1e-10);
 });
 test('Online có giới hạn ba chu kỳ, số đo 0 vẫn hợp lệ',()=>{
- assert.equal(isOnline({lastSeen:new Date(0),chu_ky_gui:5},15000),true);assert.equal(isOnline({lastSeen:new Date(0),chu_ky_gui:5},15001),false);
+ assert.equal(isOnline({lastSeen:new Date(0),chu_ky_gui:5},25000),true);assert.equal(isOnline({lastSeen:new Date(0),chu_ky_gui:5},25001),false);
  assert.equal(compare(0,'<=',0),true);assert.equal(compare(10,'>',20),false);
 });

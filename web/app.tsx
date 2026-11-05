@@ -55,22 +55,123 @@ function Icon({ name }: { name: string }) {
   );
 }
 function Badge({ value }: { value: any }) {
-  let cls = ['Thành công', 'Đã xử lý', 'LOW', true].includes(value)
+  const display =
+    value === true
+      ? 'Online'
+      : value === false
+        ? 'Offline'
+        : alertSeverityLabels[value] ||
+          alertDeliveryLabels[value] ||
+          value;
+  let cls = [
+    'Thành công',
+    'Đã xử lý',
+    'Đã gửi',
+    'Đang bật',
+    'Đã kết thúc',
+    'LOW',
+    'Thấp',
+    true,
+  ].includes(value)
     ? 'good'
-    : ['Thất bại', 'HIGH', 'Mới', false].includes(value)
+    : [
+          'Thất bại',
+          'Gửi thất bại',
+          'Tạm dừng',
+          'HIGH',
+          'Cao',
+          'Mới',
+          false,
+        ].includes(value)
       ? 'bad'
       : 'neutral';
+  if (value === 'Đã xác nhận' || value === 'MEDIUM' || value === 'Trung bình') {
+    cls = 'warning';
+  }
+  if (value === 'Đang diễn ra') {
+    cls = 'bad';
+  } else if (value === 'Đã kết thúc') {
+    cls = 'good';
+  }
   return (
     <span className={'badge ' + cls}>
-      {value === true
-        ? 'Online'
-        : value === false
-          ? 'Offline'
-          : value === 'NO_DATA'
-            ? 'Chưa có dữ liệu'
-            : value}
+      {value === 'NO_DATA' ? 'Chưa có dữ liệu' : display}
     </span>
   );
+}
+const alertMetricLabels: Record<string, string> = {
+  cong_suat_w: 'Công suất',
+  dien_ap_v: 'Điện áp',
+  dong_dien_a: 'Dòng điện',
+  dong_ro_ma: 'Dòng rò',
+  nhiet_do_c: 'Nhiệt độ',
+};
+const alertSeverityLabels: Record<string, string> = {
+  LOW: 'Thấp',
+  MEDIUM: 'Trung bình',
+  HIGH: 'Cao',
+};
+const alertDeliveryLabels: Record<string, string> = {
+  'Đang chờ': 'Đang chờ gửi',
+  'Đã gửi': 'Đã gửi',
+  'Thất bại': 'Gửi thất bại',
+};
+const alertIncidentLabels: Record<string, string> = {
+  'Đang diễn ra': 'Đang diễn ra',
+  'Đã kết thúc': 'Đã kết thúc',
+};
+function alertMetricLabel(metric: string) {
+  return alertMetricLabels[metric] || metric;
+}
+function alertSeverityLabel(severity: string) {
+  return alertSeverityLabels[severity] || severity;
+}
+function alertRuleName(rule: Row) {
+  if (
+    rule.chi_so_can_do === 'cong_suat_w' &&
+    rule.toan_tu === '>' &&
+    rule.gia_tri_nguong === 4800
+  )
+    return 'Quá tải';
+  if (
+    rule.chi_so_can_do === 'dien_ap_v' &&
+    rule.toan_tu === '<' &&
+    rule.gia_tri_nguong === 198
+  )
+    return 'Sụt áp';
+  if (
+    rule.chi_so_can_do === 'dien_ap_v' &&
+    rule.toan_tu === '>' &&
+    rule.gia_tri_nguong === 242
+  )
+    return 'Tăng áp';
+  if (
+    rule.chi_so_can_do === 'dong_ro_ma' &&
+    rule.toan_tu === '>=' &&
+    rule.gia_tri_nguong === 30
+  )
+    return 'Rò điện';
+  return rule.ten_quy_tac;
+}
+function alertMessage(alert: Row, devices: Row[], rooms: Row[]) {
+  const rule = alert.snapshot?.rule;
+  const sample = alert.snapshot?.sample;
+  const gateway = devices.find((device) => device._id === alert.ma_thiet_bi);
+  const room = gateway?.ma_phong || alert.ma_phong;
+  const roomName = rooms.find((item) => item._id === room)?.ten_phong;
+  const roomLabel = roomName
+    ? roomName
+    : room
+      ? `Phòng ${room}`
+      : 'Chưa xác định phòng';
+  if (!rule || sample?.[rule.chi_so_can_do] === undefined) {
+    return `${roomLabel}: ${alert.noi_dung_loi}`;
+  }
+  return `${roomLabel} · ${alertRuleName(rule)}: ${alertMetricLabel(
+    rule.chi_so_can_do,
+  )} ${rule.toan_tu} ${rule.gia_tri_nguong} (đo được ${
+    sample[rule.chi_so_can_do]
+  })`;
 }
 function Chart({ option, height = 290 }: { option: any; height?: number }) {
   const el = useRef<HTMLDivElement>(null);
@@ -202,6 +303,8 @@ function App() {
       total: 0,
       online: 0,
       totalPowerW: 0,
+      onlineRooms: 0,
+      totalRooms: 0,
     }),
     [lists, setLists] = useState<Row>({
       buildings: [],
@@ -391,6 +494,7 @@ function App() {
     .filter((d: Row) => d.online)
     .reduce((s: number, d: Row) => s + (d.latest?.cong_suat_w || 0), 0);
   const selected = visibleDevices.find((d: Row) => d._id === deviceId);
+  const selectedOnline = !!selected?.online;
   const chartOption = {
     animation: false,
     tooltip: { trigger: 'axis' },
@@ -545,16 +649,23 @@ function App() {
                 label="CÔNG SUẤT HIỆN TẠI"
                 value={fmt(power / 1000, 2)}
                 unit="kW"
-                detail="Tổng thiết bị đang online"
+                detail="Tổng công suất của các gateway phòng đang online"
                 featured
               />
               <Metric
-                label="THIẾT BỊ KẾT NỐI"
+                label="PHÒNG ĐANG KẾT NỐI"
                 value={String(
-                  visibleDevices.filter((d: Row) => d.online).length,
+                  data.heatmap.filter(
+                    (r: Row) => (!building || r.buildingId === building) && r.online,
+                  ).length,
                 )}
-                unit={'/ ' + visibleDevices.length}
-                detail="Online khi nhận telemetry; mất dữ liệu quá 3 chu kỳ sẽ Offline"
+                unit={
+                  '/ ' +
+                  data.heatmap.filter(
+                    (r: Row) => !building || r.buildingId === building,
+                  ).length
+                }
+                detail="Phòng Online khi gateway nhận telemetry; mất dữ liệu quá 5 chu kỳ sẽ Offline"
               />
               <Metric
                 label="ĐIỆN NĂNG TRONG KỲ"
@@ -577,7 +688,7 @@ function App() {
                   manager
                     ? alerts.filter(
                         (x) =>
-                          x.trang_thai !== 'Đã xử lý' &&
+                          x.tinh_trang !== 'Đã kết thúc' &&
                           (!building || x.buildingId === building),
                       ).length
                     : data.heatmap.filter(
@@ -607,7 +718,8 @@ function App() {
                   >
                     {visibleDevices.map((d: Row) => (
                       <option key={d._id} value={d._id}>
-                        {d.ten_thiet_bi}
+                        {lists.rooms?.find((r: Row) => r._id === d.ma_phong)?.ten_phong ||
+                          d.ten_thiet_bi}
                       </option>
                     ))}
                   </select>
@@ -615,76 +727,112 @@ function App() {
                 {samples.length ? (
                   <Chart option={chartOption} />
                 ) : (
-                  <Empty text="Đang chờ dữ liệu từ thiết bị…" />
+                  <Empty text="Đang chờ dữ liệu từ gateway phòng…" />
                 )}
               </section>
-              <section className="panel">
+              <section className="panel gateway-panel">
                 <div className="panel-head">
-                  <h2>Thông số thiết bị</h2>
-                  <Badge value={!!selected?.online} />
+                  <div>
+                    <p className="eyebrow gateway-eyebrow">GATEWAY PHÒNG</p>
+                    <h2>Thông số gateway phòng</h2>
+                  </div>
+                  <Badge value={selectedOnline} />
                 </div>
-                <Chart
-                  height={200}
-                  option={{
-                    series: [
-                      {
-                        type: 'gauge',
-                        min: 0,
-                        max: selected?.cong_suat_dinh_muc || 2000,
-                        progress: {
-                          show: true,
-                          width: 12,
-                          itemStyle: { color: '#2f8b70' },
-                        },
-                        axisLine: {
-                          lineStyle: { width: 12, color: [[1, '#edf2ee']] },
-                        },
-                        splitLine: { show: false },
-                        axisTick: { show: false },
-                        axisLabel: { show: false },
-                        pointer: { show: false },
-                        anchor: { show: false },
-                        detail: {
-                          fontSize: 25,
-                          color: '#183b30',
-                          formatter: '{value} W',
-                          offsetCenter: [0, '10%'],
-                        },
-                        title: { show: false },
-                        data: [
+                {selectedOnline ? (
+                  <>
+                    <Chart
+                      height={200}
+                      option={{
+                        series: [
                           {
-                            value: Math.round(
-                              selected?.latest?.cong_suat_w || 0,
-                            ),
+                            type: 'gauge',
+                            min: 0,
+                            max: selected?.cong_suat_dinh_muc || 2000,
+                            progress: {
+                              show: true,
+                              width: 12,
+                              itemStyle: { color: '#2f8b70' },
+                            },
+                            axisLine: {
+                              lineStyle: { width: 12, color: [[1, '#edf2ee']] },
+                            },
+                            splitLine: { show: false },
+                            axisTick: { show: false },
+                            axisLabel: { show: false },
+                            pointer: { show: false },
+                            anchor: { show: false },
+                            detail: {
+                              fontSize: 25,
+                              color: '#183b30',
+                              formatter: '{value} W',
+                              offsetCenter: [0, '10%'],
+                            },
+                            title: { show: false },
+                            data: [
+                              {
+                                value: Math.round(
+                                  selected?.latest?.cong_suat_w || 0,
+                                ),
+                              },
+                            ],
                           },
                         ],
-                      },
-                    ],
-                  }}
-                />
-                <div className="readings">
-                  <span>
-                    Điện áp
-                    <strong>
-                      {fmt(selected?.latest?.dien_ap_v, 1)} <small>V</small>
-                    </strong>
-                  </span>
-                  <span>
-                    Dòng điện
-                    <strong>
-                      {fmt(selected?.latest?.dong_dien_a, 2)} <small>A</small>
-                    </strong>
-                  </span>
-                  <span>
-                    Nhiệt độ
-                    <strong>
-                      {fmt(selected?.latest?.nhiet_do_c, 1)} <small>°C</small>
-                    </strong>
-                  </span>
-                </div>
-                <p className="muted small">
-                  Đo lúc: {date(selected?.latest?.thoi_gian_do)}
-                </p>
+                      }}
+                    />
+                    <div className="readings gateway-readings">
+                      <span>
+                        Điện áp
+                        <strong>
+                          {fmt(selected?.latest?.dien_ap_v, 1)} <small>V</small>
+                        </strong>
+                      </span>
+                      <span>
+                        Dòng điện
+                        <strong>
+                          {fmt(selected?.latest?.dong_dien_a, 2)} <small>A</small>
+                        </strong>
+                      </span>
+                      <span>
+                        Nhiệt độ
+                        <strong>
+                          {fmt(selected?.latest?.nhiet_do_c, 1)} <small>°C</small>
+                        </strong>
+                      </span>
+                    </div>
+                    {selected?.latest?.chi_tiet_mo_phong && (
+                      <div className="readings gateway-readings loads">
+                        {Object.entries(selected.latest.chi_tiet_mo_phong).map(
+                          ([name, value]) => (
+                            <span key={name}>
+                              {name.replaceAll('_', ' ')}
+                              <strong>
+                                {fmt(Number(value))} <small>W</small>
+                              </strong>
+                            </span>
+                          ),
+                        )}
+                      </div>
+                    )}
+                    <p className="muted small last-reading">
+                      Đo lúc: {date(selected?.latest?.thoi_gian_do)}
+                    </p>
+                  </>
+                ) : (
+                  <div className="offline-state">
+                    <div className="offline-icon">!</div>
+                    <div>
+                      <strong>Gateway đang Offline</strong>
+                      <p className="muted small">
+                        Chưa nhận được telemetry trong 5 chu kỳ gửi.
+                      </p>
+                    </div>
+                    <div className="offline-divider" />
+                    <p className="muted small">
+                      Bản đo cuối<br />
+                      <strong>{date(selected?.latest?.thoi_gian_do)}</strong>
+                    </p>
+                  </div>
+                )}
               </section>
             </div>
             <section className="panel">
@@ -777,7 +925,7 @@ function App() {
                       {fmt(r.tong_cong_suat_w / 1000, 2)} <small>kW</small>
                     </strong>
                     <span>
-                      {r.online}/{r.total} thiết bị online
+                      {r.online ? 'Gateway phòng online' : 'Gateway phòng offline'}
                     </span>
                   </article>
                 ))}
@@ -800,7 +948,11 @@ function App() {
                     </span>
                     <Badge value={d.online} />
                   </div>
-                  <h2>{d.ten_thiet_bi}</h2>
+                  <h2>
+                    Gateway ·{' '}
+                    {lists.rooms?.find((r: Row) => r._id === d.ma_phong)
+                      ?.ten_phong || d.ten_thiet_bi}
+                  </h2>
                   <p className="muted">
                     {
                       lists.rooms?.find((r: Row) => r._id === d.ma_phong)
@@ -867,6 +1019,7 @@ function App() {
             )}
             rules={rules.filter((a) => !building || a.buildingId === building)}
             devices={data.devices}
+            roomList={lists.rooms}
             edit={edit}
             run={run}
             saving={saving}
@@ -1043,19 +1196,31 @@ function Table({ heads, rows }: any) {
     <Empty text="Chưa có dữ liệu phù hợp" />
   );
 }
-function AlertPage({ alerts, rules, devices, edit, run, saving }: any) {
+function AlertPage({
+  alerts,
+  rules,
+  devices,
+  roomList,
+  edit,
+  run,
+  saving,
+}: any) {
   const [status, setStatus] = useState(''),
     [severity, setSeverity] = useState(''),
     [room, setRoom] = useState(''),
+    [incidentState, setIncidentState] = useState('active'),
     [since, setSince] = useState('');
-  const rooms = [...new Set<string>(devices.map((d: Row) => d.ma_phong))];
+  const roomIds = [...new Set<string>(devices.map((d: Row) => d.ma_phong))];
   return (
     <>
       <section className="panel">
         <div className="panel-head">
           <div>
             <h2>Sự cố cần theo dõi</h2>
-            <p className="muted small">Mới → Đã xác nhận → Đã xử lý</p>
+            <p className="muted small">
+              Chỉ hiển thị sự cố đang tồn tại; khi số đo trở lại bình thường,
+              cảnh báo sẽ tự kết thúc và được lưu trong lịch sử
+            </p>
           </div>
         </div>
         <div className="filters">
@@ -1066,19 +1231,30 @@ function AlertPage({ alerts, rules, devices, edit, run, saving }: any) {
             ))}
           </select>
           <select
+            value={incidentState}
+            onChange={(e) => setIncidentState(e.target.value)}
+          >
+            <option value="active">Đang diễn ra</option>
+            <option value="ended">Lịch sử đã kết thúc</option>
+            <option value="">Tất cả sự cố</option>
+          </select>
+          <select
             value={severity}
             onChange={(e) => setSeverity(e.target.value)}
           >
             <option value="">Tất cả mức độ</option>
             {['LOW', 'MEDIUM', 'HIGH'].map((s) => (
-              <option key={s}>{s}</option>
+              <option key={s} value={s}>
+                {alertSeverityLabel(s)}
+              </option>
             ))}
           </select>
           <select value={room} onChange={(e) => setRoom(e.target.value)}>
             <option value="">Tất cả phòng</option>
-            {rooms.map((r) => (
+            {roomIds.map((r) => (
               <option key={r} value={r}>
-                {devices.find((d: Row) => d.ma_phong === r)?.ten_thiet_bi}
+                {roomList.find((item: Row) => item._id === r)?.ten_phong ||
+                  `Phòng ${r}`}
               </option>
             ))}
           </select>
@@ -1096,48 +1272,39 @@ function AlertPage({ alerts, rules, devices, edit, run, saving }: any) {
             'Thời điểm',
             'Nội dung',
             'Mức độ',
+            'Tình trạng',
             'Xử lý',
             'Telegram',
-            'Thao tác',
           ]}
           rows={alerts
             .filter(
               (a: Row) =>
+                (!incidentState ||
+                  (incidentState === 'active'
+                    ? a.tinh_trang !== 'Đã kết thúc'
+                    : a.tinh_trang === 'Đã kết thúc')) &&
                 (!status || a.trang_thai === status) &&
                 (!severity || a.muc_do === severity) &&
                 (!room || a.ma_phong === room) &&
                 (!since || new Date(a.thoi_gian_phat_hien) >= new Date(since)),
             )
             .map((a: Row) => [
-              date(a.thoi_gian_phat_hien),
+                <span className="wrap">
+                  <span>Bắt đầu: {date(a.thoi_gian_phat_hien)}</span>
+                  {a.tinh_trang === 'Đã kết thúc' && (
+                    <small>Kết thúc: {date(a.ket_thuc_luc || a.lastSeen)}</small>
+                  )}
+                </span>,
               <span className="wrap">
-                {a.noi_dung_loi}
+                {alertMessage(a, devices, roomList)}
                 <small>{a.occurrences} lần ghi nhận</small>
               </span>,
               <Badge value={a.muc_do} />,
+              <Badge
+                value={alertIncidentLabels[a.tinh_trang] || 'Đang diễn ra'}
+              />,
               <Badge value={a.trang_thai} />,
-              a.trang_thai_gui,
-              a.trang_thai !== 'Đã xử lý' ? (
-                <button
-                  disabled={saving}
-                  onClick={() => {
-                    const note =
-                      a.trang_thai === 'Đã xác nhận'
-                        ? prompt('Ghi chú kết quả xử lý:')
-                        : '';
-                    if (note === null) return;
-                    run(`alerts/history/${a._id}/status`, 'PATCH', {
-                      trang_thai:
-                        a.trang_thai === 'Mới' ? 'Đã xác nhận' : 'Đã xử lý',
-                      ghi_chu: note,
-                    });
-                  }}
-                >
-                  {a.trang_thai === 'Mới' ? 'Xác nhận' : 'Đã xử lý'}
-                </button>
-              ) : (
-                'Hoàn tất'
-              ),
+              <Badge value={a.trang_thai_gui} />,
             ])}
         />
       </section>
@@ -1163,11 +1330,11 @@ function AlertPage({ alerts, rules, devices, edit, run, saving }: any) {
             'Thao tác',
           ]}
           rows={rules.map((r: Row) => [
-            r.ten_quy_tac,
-            `${r.chi_so_can_do} ${r.toan_tu} ${r.gia_tri_nguong}`,
+            alertRuleName(r),
+            `${alertMetricLabel(r.chi_so_can_do)} ${r.toan_tu} ${r.gia_tri_nguong}`,
             r.thoi_gian_duy_tri + ' giây',
             r.cooldown + ' giây',
-            r.bat ? 'Đang bật' : 'Tạm dừng',
+            <Badge value={r.bat ? 'Đang bật' : 'Tạm dừng'} />,
             <div className="actions">
               <button onClick={() => edit('rules', r)}>Sửa</button>
               <button
@@ -1398,6 +1565,7 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
           'dien_ap_v',
           'dong_dien_a',
           'nhiet_do_c',
+          'dong_ro_ma',
         ]),
       },
       {

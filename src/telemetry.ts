@@ -171,6 +171,7 @@ export class Telemetry
               dien_ap_v: row.dien_ap_v,
               dong_dien_a: row.dong_dien_a,
               nhiet_do_c: row.nhiet_do_c,
+              chi_tiet_mo_phong: row.chi_tiet_mo_phong,
             },
           },
         },
@@ -194,8 +195,8 @@ export class Telemetry
     );
 
     if (
-      Date.now() - row.thoi_gian_do.getTime() <=
-      device.chu_ky_gui * 3000
+      Date.now() - row.receivedAt.getTime() <=
+      device.chu_ky_gui * 5000
     ) {
       await this.alerts.evaluate(device, row);
     }

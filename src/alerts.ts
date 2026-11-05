@@ -112,7 +112,9 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
       })
       .toArray();
 
-    const measured = +sample.thoi_gian_do;
+    const measured = +(
+      sample.receivedAt || sample.thoi_gian_do
+    );
 
     for (const rule of rules) {
       if (rule.lastSample && measured <= +rule.lastSample) {
@@ -127,15 +129,44 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
           rule.gia_tri_nguong,
         );
 
+      if (!violation) {
+        const closed = await this.db.collection('alerts').updateMany(
+          {
+            ma_quy_tac: rule._id,
+            tinh_trang: { $ne: 'Đã kết thúc' },
+          },
+          {
+            $set: {
+              tinh_trang: 'Đã kết thúc',
+              trang_thai: 'Đã xử lý',
+              ket_thuc_luc: sample.receivedAt || new Date(),
+            },
+          },
+        );
+
+        if (closed.modifiedCount > 0) {
+          this.events.send(
+            device.buildingId,
+            'alert',
+            {
+              message: `${device.ma_phong}: Sự cố đã trở lại bình thường`,
+            },
+            true,
+          );
+        }
+      }
+
       const isContinuous =
         rule.start &&
         rule.lastSample &&
-        measured - +rule.lastSample <= device.chu_ky_gui * 3000;
+        measured - +rule.lastSample <= device.chu_ky_gui * 5000;
 
       let start = null;
 
       if (violation) {
-        start = isContinuous ? rule.start : sample.thoi_gian_do;
+        start = isContinuous
+          ? rule.start
+          : sample.receivedAt || sample.thoi_gian_do;
       }
 
       await this.db.collection('rules').updateOne(
@@ -146,8 +177,9 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
         {
           $set: {
             start,
-            lastSample: sample.thoi_gian_do,
+            lastSample: sample.receivedAt || sample.thoi_gian_do,
           },
+          ...(!violation ? { $unset: { lastAttempt: '' } } : {}),
         },
       );
 
@@ -161,32 +193,34 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
       // Giữ lượt cooldown trước khi đưa thông báo vào hàng chờ.
       const now = new Date();
 
-      const claimed = await this.db.collection('rules').findOneAndUpdate(
-        {
-          _id: rule._id,
-          bat: true,
-          updatedAt: rule.updatedAt,
-          $or: [
-            { lastAttempt: { $exists: false } },
-            { lastAttempt: null },
+      const canNotify =
+        !rule.lastAttempt ||
+        +rule.lastAttempt <= +now - rule.cooldown * 1000;
+
+      const claimed = canNotify
+        ? await this.db.collection('rules').findOneAndUpdate(
             {
-              lastAttempt: {
-                $lte: new Date(+now - rule.cooldown * 1000),
+              _id: rule._id,
+              bat: true,
+              updatedAt: rule.updatedAt,
+              $or: [
+                { lastAttempt: { $exists: false } },
+                { lastAttempt: null },
+                {
+                  lastAttempt: {
+                    $lte: new Date(+now - rule.cooldown * 1000),
+                  },
+                },
+              ],
+            },
+            {
+              $set: {
+                lastAttempt: now,
               },
             },
-          ],
-        },
-        {
-          $set: {
-            lastAttempt: now,
-          },
-        },
-        { returnDocument: 'after' },
-      );
-
-      if (!claimed) {
-        continue;
-      }
+            { returnDocument: 'after' },
+          )
+        : null;
 
       let alert = await this.db.collection('alerts').findOne(
         {
@@ -194,6 +228,7 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
           trang_thai: {
             $in: ['Mới', 'Đã xác nhận'],
           },
+          tinh_trang: { $ne: 'Đã kết thúc' },
         },
         {
           sort: {
@@ -217,6 +252,7 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
           ma_phong: device.ma_phong,
           thoi_gian_phat_hien: now,
           trang_thai: 'Mới',
+          tinh_trang: 'Đang diễn ra',
           muc_do: rule.muc_do,
           noi_dung_loi: message,
           snapshot: {
@@ -239,17 +275,29 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
         {
           $set: {
             lastSeen: now,
-            trang_thai_gui: 'Đang chờ',
-            notificationText: message,
-            nextRetry: now,
-            attempts: 0,
+            tinh_trang: 'Đang diễn ra',
             cooldown: rule.cooldown,
+            'snapshot.sample': sample,
           },
           $inc: {
             occurrences: 1,
           },
         },
       );
+
+      if (claimed) {
+        await this.db.collection('alerts').updateOne(
+          { _id: alert._id },
+          {
+            $set: {
+              trang_thai_gui: 'Đang chờ',
+              notificationText: message,
+              nextRetry: now,
+              attempts: 0,
+            },
+          },
+        );
+      }
 
       this.events.send(
         device.buildingId,

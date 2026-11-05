@@ -101,7 +101,7 @@ export function isOnline(device: any, now = Date.now()) {
   return (
     !!device.lastSeen &&
     now - new Date(device.lastSeen).getTime() <=
-      device.chu_ky_gui * 3000
+      device.chu_ky_gui * 5000
   );
 }
 
