@@ -40,8 +40,7 @@ export class Control
   async onApplicationBootstrap() {
     // Persisted pending commands survive process restarts and expire using their original deadline.
     this.timer = setInterval(() => {
-      this.reconcileFromTelemetry()
-        .then(() => this.expire())
+      this.expire()
         .catch((error) => {
         this.log.error(error.message);
       });
@@ -80,7 +79,7 @@ export class Control
       runId: schedule?.runId || null,
       trang_thai: 'Đang chờ',
       thoi_gian_thuc_hien: now,
-      deadline: new Date(+now + 5000),
+      deadline: new Date(+now + 10000),
     };
 
     await this.db.collection('commands').insertOne(command);
@@ -141,7 +140,7 @@ export class Control
         );
       })
       .catch((error) =>
-        this.fail(command, error.message).catch((cause) => {
+        this.fail(command, error.message, true).catch((cause) => {
           this.log.error(cause.message);
         }),
       );
@@ -149,7 +148,7 @@ export class Control
     return command;
   }
 
-  private async fail(command: any, reason: string) {
+  private async fail(command: any, reason: string, uncertain = false) {
     const result = await this.db.collection('commands').findOneAndUpdate(
       {
         _id: command._id,
@@ -159,7 +158,7 @@ export class Control
       },
       {
         $set: {
-          trang_thai: 'Thất bại',
+          trang_thai: uncertain ? 'Chưa xác định' : 'Thất bại',
           loi: reason,
           completedAt: new Date(),
         },
@@ -220,7 +219,7 @@ export class Control
     const time = new Date(dto.thoi_gian);
     const now = new Date();
 
-    if (+time > +now + 5000) {
+    if (!Number.isFinite(+time)) {
       await this.db.audit('INVALID_ACK', {
         reason: 'Thời điểm ACK không hợp lệ',
       });
@@ -228,24 +227,12 @@ export class Control
       return;
     }
 
-    // The command id and authenticated MQTT topic identify the command.
-    // A device may have an unsynchronised clock, so an old device timestamp
-    // must not turn a real relay acknowledgement into a false failure.
-    const stateTime =
-      +time >= +command.thoi_gian_thuc_hien - 1000
-        ? time
-        : now;
+    // Correlate by device, topic and command UUID, not the ESP clock.
+    // Keep its timestamp in ack for diagnosis; order current state by server receipt.
+    const stateTime = now;
 
-    if (+now > +command.deadline) {
-      await this.fail(command, 'Hết 5 giây chờ ACK');
-
-      await this.db.collection('commands').updateOne(
-        { _id: command._id },
-        {
-          $set: { lateAck: dto },
-        },
-      );
-    } else {
+    let completed: any;
+    {
       const relayMatches =
         dto.trang_thai_relay === (command.hanh_dong === 'Bật');
 
@@ -255,7 +242,7 @@ export class Control
           {
             _id: command._id,
             trang_thai: {
-              $in: ['Đang chờ', 'Đã gửi'],
+              $in: ['Đang chờ', 'Đã gửi', 'Chưa xác định'],
             },
           },
           {
@@ -268,36 +255,35 @@ export class Control
                 dto.loi ||
                 (relayMatches ? '' : 'Relay không khớp'),
               ack: dto,
+              ...(+now > +command.deadline ? { lateAck: dto } : {}),
+              confirmedBy: 'ack',
+              ackReceivedAt: now,
+              ackClockSkewMs: +time - +now,
               completedAt: now,
             },
           },
           { returnDocument: 'after' },
         );
 
-      if (result) {
-        this.events.send(
-          device.buildingId,
-          'command',
-          result,
-          true,
-        );
-      }
+      completed = result;
     }
 
+    // Duplicate ACKs must not overwrite telemetry or produce another popup.
+    if (!completed) return;
     // Old ACK cannot overwrite the state of a more recently requested command or measurement.
     await this.db.collection('devices').updateOne(
       {
         _id: device._id,
         latestCommandId: command._id,
         $or: [
-        { lastRelayAt: { $lte: stateTime } },
+          { lastRelayAt: { $lte: stateTime } },
           { lastRelayAt: { $exists: false } },
         ],
       },
       {
         $set: {
           trang_thai_relay: dto.trang_thai_relay,
-        lastRelayAt: stateTime,
+          lastRelayAt: stateTime,
           lastSeen: now,
         },
       },
@@ -312,6 +298,13 @@ export class Control
         $set: { pendingCommand: null },
       },
     );
+    if (completed) this.events.send(device.buildingId, 'command', completed, true);
+  }
+
+  async result(id: string, user: User) {
+    return this.db.collection('commands').findOne({
+      _id: id, ...this.security.buildingFilter(user),
+    });
   }
 
   async logs(user: User) {
@@ -345,63 +338,11 @@ export class Control
         .toArray();
 
       for (const command of rows) {
-        await this.fail(command, 'Hết 5 giây chờ ACK');
+        await this.fail(command, 'Sau 10 giây chưa nhận được ACK; chưa thể kết luận thiết bị đã thực hiện hay chưa.', true);
       }
     } finally {
       this.busy = false;
     }
   }
 
-  private async reconcileFromTelemetry() {
-      const commands = await this.db
-        .collection('commands')
-        .find({
-          trang_thai: { $in: ['Đang chờ', 'Đã gửi'] },
-          thoi_gian_thuc_hien: { $lte: new Date() },
-        })
-        .limit(50)
-        .toArray();
-
-      for (const command of commands) {
-        const device = await this.db
-          .collection('devices')
-          .findOne({ _id: command.ma_thiet_bi });
-
-        if (
-          !device ||
-          !device.pendingCommand ||
-          device.pendingCommand !== command._id ||
-          device.lastSeen < command.thoi_gian_thuc_hien ||
-          device.trang_thai_relay !== (command.hanh_dong === 'Bật')
-        ) {
-          continue;
-        }
-
-        const result = await this.db
-          .collection('commands')
-          .findOneAndUpdate(
-            {
-              _id: command._id,
-              trang_thai: { $in: ['Đang chờ', 'Đã gửi'] },
-            },
-            {
-              $set: {
-                trang_thai: 'Thành công',
-                loi: '',
-                completedAt: new Date(),
-                confirmedBy: 'telemetry',
-              },
-            },
-            { returnDocument: 'after' },
-          );
-
-        if (result) {
-          await this.db.collection('devices').updateOne(
-            { _id: device._id, pendingCommand: command._id },
-            { $set: { pendingCommand: null } },
-          );
-          this.events.send(device.buildingId, 'command', result, true);
-      }
-    }
-  }
 }

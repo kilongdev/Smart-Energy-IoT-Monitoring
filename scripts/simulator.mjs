@@ -13,7 +13,7 @@ client.on('message',(topic,bytes)=>{try{
  if(mode==='drop')return;
  const ack={ma_lenh:mode==='wrong-id'?'00000000-0000-4000-8000-000000000000':payload.ma_lenh,ma_thiet_bi:d.id,trang_thai_relay:mode==='mismatch'?!d.relay:d.relay,thoi_gian:new Date().toISOString()};
  d.acks.set(payload.ma_lenh,ack);if(d.acks.size>1000)d.acks.delete(d.acks.keys().next().value);
- setTimeout(()=>client.publish(d.topic+'/ack',JSON.stringify(ack),{qos:1}),mode==='late'?6500:150);
+ setTimeout(()=>client.publish(d.topic+'/ack',JSON.stringify(ack),{qos:1}),mode==='late'?11500:150);
 }catch(e){console.error(e.message);}});
 const timer=setInterval(()=>{if(!client.connected)return;for(let i=0;i<state.length;i++){
  const d=state[i];if(Date.now()-d.last<d.period*1000)continue;d.last=Date.now();

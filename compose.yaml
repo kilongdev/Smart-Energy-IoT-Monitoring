@@ -48,6 +48,7 @@ services:
       timeout: 5s
       retries: 30
   simulator:
+    profiles: ["simulator"]
     build: .
     restart: unless-stopped
     env_file: .env

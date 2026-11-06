@@ -34,6 +34,17 @@ Do not commit real credentials or publish them in a public Wokwi project.
 
 ## Demo flow
 
+### Add another ESP from the dashboard
+
+In **Danh mục → Thiết bị → Thêm thiết bị**, select a room and enter a name.
+MAC and MQTT topic are optional; an omitted topic is generated uniquely.
+After saving, **Kết nối ESP** shows the device ID, topic, room label and sample
+interval as a copyable Wokwi configuration. Replace the corresponding constants
+in a copy of this sketch, then copy the Client ID line into `connectMqtt()`.
+Keep the working EMQX settings. Use one registered device per running ESP.
+You can reopen the instructions using **Kết nối ESP** in the device list.
+The selected room in the dashboard determines where the backend stores telemetry.
+
 1. Start the backend with `docker compose up -d --build`.
 2. Run the Wokwi simulation.
 3. Open the dashboard and select the seeded device.

@@ -178,6 +178,12 @@ export class MonitoringController {
 export class AlertController {
   constructor(private readonly alerts: Alerts) {}
 
+  @Roles('Admin', 'QuanLy', 'NguoiXem')
+  @Get('active')
+  active(@Req() request: any) {
+    return this.alerts.active(request.user);
+  }
+
   @Get('rules')
   rules(@Req() request: any) {
     return this.alerts.rules(request.user);
@@ -239,6 +245,11 @@ export class ControlController {
     @Req() request: any,
   ) {
     return this.control.send(id, dto.hanh_dong, request.user);
+  }
+
+  @Get('commands/:id')
+  command(@Param('id', ParseUUIDPipe) id: string, @Req() request: any) {
+    return this.control.result(id, request.user);
   }
 
   @Get('logs')

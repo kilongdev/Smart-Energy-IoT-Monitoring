@@ -10,9 +10,10 @@ const date = (v: any) =>
     ? new Date(v).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })
     : 'Chưa có';
 const getToken = () => sessionStorage.getItem('energy-token');
-async function api(path: string, method = 'GET', data?: any) {
+async function api(path: string, method = 'GET', data?: any, signal?: AbortSignal) {
   const r = await fetch('/api/v1/' + path, {
     method,
+    signal,
     headers: {
       Authorization: 'Bearer ' + getToken(),
       ...(data ? { 'Content-Type': 'application/json' } : {}),
@@ -86,9 +87,9 @@ function Badge({ value }: { value: any }) {
   return (
     <span className={'badge ' + cls}>
       {value === true
-        ? 'Online'
+        ? 'Đang kết nối'
         : value === false
-          ? 'Offline'
+          ? 'Mất kết nối'
           : value === 'NO_DATA'
             ? 'Chưa có dữ liệu'
             : labels[value] || value}
@@ -335,6 +336,10 @@ function App() {
     [rules, setRules] = useState<Row[]>([]),
     [schedules, setSchedules] = useState<Row[]>([]),
     [logs, setLogs] = useState<Row[]>([]);
+  const [activeAlerts, setActiveAlerts] = useState<Row[]>([]);
+  const [deviceSetup, setDeviceSetup] = useState<Row | null>(null);
+  const bellRef = useRef<HTMLDivElement>(null);
+
   const [notice, setNotice] = useState(''),
     [noticeTone, setNoticeTone] = useState<'success' | 'error'>('success'),
     [commandPopup, setCommandPopup] = useState<Row | null>(null),
@@ -347,11 +352,41 @@ function App() {
     [samples, setSamples] = useState<Row[]>([]),
     [energy, setEnergy] = useState<Row[]>([]),
     [period, setPeriod] = useState('day');
+
+  useEffect(() => {
+    if (!bellOpen) return;
+    const outside = (event: PointerEvent) => {
+      if (!bellRef.current?.contains(event.target as Node)) setBellOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setBellOpen(false);
+        bellRef.current?.querySelector('button')?.focus();
+      }
+    };
+    document.addEventListener('pointerdown', outside);
+    document.addEventListener('keydown', escape);
+    return () => {
+      document.removeEventListener('pointerdown', outside);
+      document.removeEventListener('keydown', escape);
+    };
+  }, [bellOpen]);
   const manager = user && user.vai_tro !== 'NguoiXem';
   const admin = user?.vai_tro === 'Admin';
   const refreshTimer = useRef<any>(null);
+  const commandResults = useRef(new Map<string, Row>());
+  const commandPolls = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  useEffect(() => () => {
+    commandPolls.current.forEach(clearTimeout);
+    commandPolls.current.clear();
+    commandResults.current.clear();
+  }, [user]);
   const logout = useCallback(() => {
     sessionStorage.removeItem('energy-token');
+    setCommandPopup(null);
+    setDeviceSetup(null);
+    setBellOpen(false);
+    setActiveAlerts([]);
     setUser(null);
     setTab('dashboard');
     setDialog(null);
@@ -378,11 +413,13 @@ function App() {
         'devices',
         ...(admin ? ['users'] : []),
       ];
-      const [dash, ...values] = await Promise.all([
+      const [dash, active, ...values] = await Promise.all([
         api('dashboard'),
+        api('alerts/active'),
         ...names.map((x) => api(x)),
       ]);
       setData(dash);
+      setActiveAlerts(active);
       setLists(Object.fromEntries(names.map((n, i) => [n, values[i]])));
       if (manager) {
         const [a, r, s, l] = await Promise.all([
@@ -488,6 +525,18 @@ function App() {
     }
   }, [notice]);
   function showCommandResult(command: Row) {
+    const id = command._id || command.ma_lenh;
+    if (id && commandResults.current.has(id)) return;
+    if (id && ['Thành công', 'Thất bại'].includes(command.trang_thai)) {
+      commandResults.current.set(id, command);
+      clearTimeout(commandPolls.current.get(id));
+      commandPolls.current.delete(id);
+    }
+    // An uncertain timeout can later be replaced by an authoritative ACK.
+    if (command.trang_thai === 'Chưa xác định') {
+      setCommandPopup((previous) => previous?._id === id && previous.trang_thai === 'Chưa xác định' ? previous : command);
+      return;
+    }
     setCommandPopup(command);
     if (command.trang_thai === 'Thành công') {
       setNoticeTone('success');
@@ -503,14 +552,20 @@ function App() {
   }
   function watchCommand(command: Row) {
     const commandId = command._id || command.ma_lenh;
-    if (!commandId || !command.ma_lenh) return;
+    if (!commandId || commandResults.current.has(commandId) || commandPolls.current.has(commandId)) return;
 
     let attempts = 0;
     const poll = async () => {
-      if (attempts++ >= 12) return;
+      if (!commandPolls.current.has(commandId)) return;
+      if (attempts++ >= 30) {
+        commandPolls.current.delete(commandId);
+        setCommandPopup({ ...command, trang_thai: 'Chưa xác định', loi: 'Chưa lấy được kết quả. Kiểm tra kết nối và nhật ký trước khi gửi lại lệnh.' });
+        return;
+      }
       try {
-        const logs = await api('control/logs');
-        const current = logs.find((item: Row) => item._id === commandId);
+        const current = await api('control/commands/' + encodeURIComponent(commandId), 'GET', undefined, AbortSignal.timeout(3000));
+        if (!commandPolls.current.has(commandId)) return;
+        if (current?.trang_thai === 'Chưa xác định') showCommandResult(current);
         if (
           current?.trang_thai === 'Thành công' ||
           current?.trang_thai === 'Thất bại'
@@ -519,15 +574,10 @@ function App() {
           await load();
           return;
         }
-      } catch (error: any) {
-        if (attempts >= 12) {
-          setError(error.message || 'Không thể kiểm tra kết quả lệnh');
-          return;
-        }
-      }
-      setTimeout(poll, 500);
+      } catch {}
+      if (commandPolls.current.has(commandId)) commandPolls.current.set(commandId, setTimeout(poll, 500));
     };
-    setTimeout(poll, 500);
+    commandPolls.current.set(commandId, setTimeout(poll, 500));
   }
   async function change(
     path: string,
@@ -538,27 +588,28 @@ function App() {
     setSaving(true);
     setError('');
     try {
-      const result = await api(path, method, payload);
+      const result = await api(path, method, payload, path.includes('/switch') ? AbortSignal.timeout(10000) : undefined);
       if (path.includes('/switch')) {
-        setCommandPopup({
-          ...result,
-          trang_thai: 'Đang chờ',
-        });
+        showCommandResult(result);
       }
-      setNoticeTone(result.trang_thai === 'Thất bại' ? 'error' : 'success');
-      setNotice(
-        result.trang_thai === 'Thất bại'
-          ? 'Lệnh thất bại: ' + result.loi
-          : message,
-      );
-      if (path.includes('/switch/') || path.includes('/switch')) {
+      if (!path.includes('/switch')) {
+        setNoticeTone(result.trang_thai === 'Thất bại' ? 'error' : 'success');
+        setNotice(
+          result.trang_thai === 'Thất bại'
+            ? 'Lệnh thất bại: ' + result.loi
+            : message,
+        );
+      }
+      if (path.includes('/switch')) {
         watchCommand(result);
       }
       setDialog(null);
+      if (path === 'devices' && method === 'POST') setDeviceSetup(result);
       await load();
       return result;
     } catch (e: any) {
       setError(e.message);
+      if (path.includes('/switch')) setCommandPopup({ hanh_dong: payload?.hanh_dong, trang_thai: 'Chưa xác định', loi: e.message + '. Kiểm tra nhật ký trước khi gửi lại lệnh.' });
       throw e;
     } finally {
       setSaving(false);
@@ -575,18 +626,15 @@ function App() {
     .reduce((s: number, d: Row) => s + (d.latest?.cong_suat_w || 0), 0);
   const selected = visibleDevices.find((d: Row) => d._id === deviceId);
   const selectedOnline = !!selected?.online;
-  const notifications = [
-    ...alerts
-      .filter((item) => item.tinh_trang !== 'Đã kết thúc')
-      .slice(0, 6)
+  const notifications = activeAlerts
       .map((item) => ({
         id: `alert-${item._id}`,
-        title: item.ten_quy_tac || 'Cảnh báo năng lượng',
+        title: item.snapshot?.rule?.ten_quy_tac || 'Cảnh báo năng lượng',
         detail: item.noi_dung_loi || item.tinh_trang || 'Có bất thường cần kiểm tra',
-        time: item.bat_dau_luc || item.createdAt,
+        time: item.thoi_gian_phat_hien,
+        state: item.tinh_trang === 'Đang phục hồi' ? 'Đang theo dõi phục hồi' : 'Đang diễn ra',
         tone: 'danger',
-      })),
-  ].sort((a, b) => +new Date(b.time || 0) - +new Date(a.time || 0));
+      }));
   const notificationCount = notifications.length;
   const chartOption = {
     animation: false,
@@ -701,11 +749,12 @@ function App() {
             >
               API Docs ↗
             </a>
-            <div className="notification-wrap">
+            <div className="notification-wrap" ref={bellRef}>
               <button
                 className="notification-button"
-                aria-label="Mở thông báo"
+                aria-label={`Cảnh báo đang diễn ra: ${notificationCount}`}
                 aria-expanded={bellOpen}
+                aria-controls="active-alert-notifications"
                 onClick={() => setBellOpen((open) => !open)}
               >
                 <Icon name="bell" />
@@ -716,10 +765,10 @@ function App() {
                 )}
               </button>
               {bellOpen && (
-                <div className="notification-menu" role="dialog" aria-label="Thông báo">
+                <section id="active-alert-notifications" className="notification-menu" aria-label="Cảnh báo đang diễn ra">
                   <div className="notification-head">
-                    <strong>Thông báo</strong>
-                    <span>{notificationCount} chưa xử lý</span>
+                    <strong>Cảnh báo đang diễn ra</strong>
+                    <span>{notificationCount} cảnh báo</span>
                   </div>
                   {notifications.length ? (
                     notifications.map((item) => (
@@ -728,14 +777,16 @@ function App() {
                         <div>
                           <strong>{item.title}</strong>
                           <span>{item.detail}</span>
+                          <small>{item.state}</small>
                           <small>{date(item.time)}</small>
                         </div>
                       </div>
                     ))
                   ) : (
-                    <p className="notification-empty">Chưa có thông báo mới</p>
+                    <p className="notification-empty">Không có cảnh báo đang diễn ra</p>
                   )}
-                </div>
+                  <p className="notification-empty">Cảnh báo tự biến mất khi hệ thống xác nhận thông số đã phục hồi.</p>
+                </section>
               )}
             </div>
           </div>
@@ -749,17 +800,19 @@ function App() {
                   ? 'failure'
                   : 'pending'
             }`}
-            role="alertdialog"
-            aria-live="assertive"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
           >
             <strong>
-              {commandPopup.trang_thai === 'Đang chờ'
+              {['Đang chờ', 'Đã gửi'].includes(commandPopup.trang_thai)
                 ? 'Đang chờ thiết bị xác nhận'
                 : commandPopup.trang_thai}
             </strong>
             <span>
               Lệnh {commandPopup.hanh_dong}
-              {commandPopup.trang_thai === 'Thất bại' &&
+              {commandPopup.ma_thiet_bi && ` · ${lists.devices.find((d: Row) => d._id === commandPopup.ma_thiet_bi)?.ten_thiet_bi || commandPopup.ma_thiet_bi}`}
+              {['Thất bại', 'Chưa xác định'].includes(commandPopup.trang_thai) &&
                 `: ${commandPopup.loi || 'Không nhận được xác nhận'}`}
             </span>
             <button
@@ -893,8 +946,8 @@ function App() {
               <section className="panel gateway-panel">
                 <div className="panel-head">
                   <div>
-                    <p className="eyebrow gateway-eyebrow">GATEWAY PHÒNG</p>
-                    <h2>Thông số gateway phòng</h2>
+                    <p className="eyebrow gateway-eyebrow">GIÁM SÁT ĐIỆN NĂNG</p>
+                    <h2>Thông số điện trong phòng</h2>
                   </div>
                   <Badge value={selectedOnline} />
                 </div>
@@ -964,7 +1017,7 @@ function App() {
                         {Object.entries(selected.latest.chi_tiet_mo_phong).map(
                           ([name, value]) => (
                             <span key={name}>
-                              {name.replaceAll('_', ' ')}
+                              {({ den: 'Đèn chiếu sáng', quat: 'Quạt', may_lanh_1: 'Máy lạnh 1', may_lanh_2: 'Máy lạnh 2', may_chieu: 'Máy chiếu', o_cam: 'Ổ cắm' } as Record<string, string>)[name] || name.replaceAll('_', ' ')}
                               <strong>
                                 {fmt(Number(value))} <small>W</small>
                               </strong>
@@ -984,9 +1037,9 @@ function App() {
                   <div className="offline-state">
                     <div className="offline-icon">!</div>
                     <div>
-                      <strong>Gateway đang Offline</strong>
+                      <strong>Bộ giám sát đang mất kết nối</strong>
                       <p className="muted small">
-                        Chưa nhận được telemetry trong 5 chu kỳ gửi.
+                        Chưa nhận được dữ liệu đo trong 5 chu kỳ gửi.
                       </p>
                     </div>
                     <div className="offline-divider" />
@@ -1103,9 +1156,9 @@ function App() {
         {tab === 'control' && (
           <>
             <p className="info-text">
-              Lệnh chuyển sang “Thành công” sau khi thiết bị xác nhận. Nếu quá 5
-              giây chưa có ACK, lệnh thất bại; kiểm tra nhật ký để biết nguyên
-              nhân.
+              Lệnh chuyển sang “Thành công” sau khi thiết bị xác nhận. Nếu quá 10
+              giây chưa có ACK, kết quả là “Chưa xác định”; ACK đến muộn sẽ cập nhật
+              lại kết quả theo phản hồi thiết bị.
             </p>
             <div className="device-grid">
               {visibleDevices.map((d: Row) => (
@@ -1288,12 +1341,13 @@ function App() {
           </section>
         )}
         {tab === 'catalog' && (
-          <CatalogPage lists={lists} edit={edit} run={run} />
+          <CatalogPage lists={lists} edit={edit} run={run} setup={setDeviceSetup} />
         )}
         <footer>
           SMART ENERGY IOT <span>Giám sát · Cảnh báo · Điều khiển</span>
         </footer>
       </main>
+      {deviceSetup && <DeviceSetup device={lists.devices?.find((d: Row) => d._id === deviceSetup._id) || deviceSetup} rooms={lists.rooms || []} close={() => setDeviceSetup(null)} />}
       {dialog && (
         <Editor
           kind={dialog.kind}
@@ -1552,13 +1606,51 @@ const kindLabels: Record<string, string> = {
   rules: 'Quy tắc cảnh báo',
   schedules: 'Lịch hẹn giờ',
 };
-function CatalogPage({ lists, edit, run }: any) {
+function DeviceSetup({ device, rooms, close }: { device: Row; rooms: Row[]; close: () => void }) {
+  const [copied, setCopied] = useState('');
+  const room = rooms.find(r => r._id === device.ma_phong);
+  const config = [
+    `const char* DEVICE_ID = ${JSON.stringify(device._id)};`,
+    `const char* ROOM_ID = ${JSON.stringify(room?.ten_phong || device.ma_phong)};`,
+    `const char* TOPIC_BASE = ${JSON.stringify(device.chu_de_mqtt)};`,
+    `const unsigned long SAMPLE_INTERVAL = ${(device.chu_ky_gui || 5) * 1000};`,
+  ].join('\n');
+  async function copy(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied('Đã sao chép.');
+    } catch {
+      setCopied('Không truy cập được clipboard. Chọn nội dung trong ô rồi nhấn Ctrl+C.');
+    }
+  }
+  return <div className="modal-backdrop">
+    <section className="modal" role="dialog" aria-modal="true" aria-label="Kết nối ESP">
+      <div className="panel-head"><h2>Kết nối ESP · {device.ten_thiet_bi}</h2><button autoFocus onClick={close} aria-label="Đóng hướng dẫn kết nối">×</button></div>
+      <p role="status">{device.online ? '🟢 ESP đã kết nối — đang nhận dữ liệu.' : device.lastSeen ? 'ESP hiện offline. Kiểm tra mô phỏng và kết nối EMQX.' : 'Đang chờ ESP kết nối lần đầu…'}</p>
+      <p>Phòng: <strong>{room?.ten_phong || device.ma_phong}</strong>. Thiết bị đã được đăng ký; chạy ESP với cấu hình dưới đây để bắt đầu nhận dữ liệu.</p>
+      <ol>
+        <li>Tạo bản sao dự án Wokwi đang dùng và mở <code>sketch.ino</code>.</li>
+        <li>Thay các dòng cấu hình tương ứng bằng đoạn dưới đây. Giữ cấu hình EMQX giống ESP đang hoạt động.</li>
+      </ol>
+      <textarea aria-label="Cấu hình Wokwi" readOnly rows={5} value={config} style={{ width: '100%', fontFamily: 'monospace' }} onFocus={e => e.target.select()} />
+      <button type="button" onClick={() => copy(config)}>Sao chép cấu hình Wokwi</button>
+      <p>Trong <code>connectMqtt()</code>, thay dòng tạo <code>clientId</code> bằng dòng sau để mỗi ESP có kết nối riêng:</p>
+      <textarea aria-label="MQTT Client ID" readOnly rows={2} value={'String clientId = String("wokwi-energy-") + DEVICE_ID;'} style={{ width: '100%', fontFamily: 'monospace' }} onFocus={e => e.target.select()} />
+      <button type="button" onClick={() => copy('String clientId = String("wokwi-energy-") + DEVICE_ID;')}>Sao chép Client ID</button>
+      <p>Chạy mô phỏng, kiểm tra thiết bị Online trên dashboard rồi thử bật/tắt. Mỗi ESP dùng một mã thiết bị và topic riêng; không dùng cấu hình này cho hai ESP cùng lúc.</p>
+      <p role="status">{copied}</p>
+      <div className="modal-actions"><button className="primary" onClick={close}>Đã hiểu</button></div>
+    </section>
+  </div>;
+}
+
+function CatalogPage({ lists, edit, run, setup }: any) {
   const [kind, setKind] = useState('buildings');
   const fields: Record<string, string[]> = {
     buildings: ['ten_toa_nha', 'dia_chi'],
     floors: ['so_tang', 'ma_toa_nha'],
     rooms: ['ten_phong', 'loai_phong'],
-    devices: ['ten_thiet_bi', 'chu_de_mqtt', 'chu_ky_gui'],
+    devices: ['ten_thiet_bi', 'ma_phong', 'online', 'chu_de_mqtt', 'chu_ky_gui'],
     users: ['tai_khoan', 'ho_ten', 'vai_tro'],
   };
   return (
@@ -1592,6 +1684,8 @@ function CatalogPage({ lists, edit, run }: any) {
                   ten_phong: 'Tên phòng',
                   loai_phong: 'Loại phòng',
                   ten_thiet_bi: 'Tên thiết bị',
+                  ma_phong: 'Phòng',
+                  online: 'Kết nối',
                   chu_de_mqtt: 'MQTT topic',
                   chu_ky_gui: 'Chu kỳ (giây)',
                   tai_khoan: 'Tài khoản',
@@ -1604,11 +1698,16 @@ function CatalogPage({ lists, edit, run }: any) {
         ]}
         rows={(lists[kind] || []).map((r: Row) => [
           ...fields[kind].map((k) =>
-            k === 'ma_toa_nha'
+            k === 'online'
+              ? (r.online ? 'Online' : r.lastSeen ? 'Offline' : 'Chưa kết nối')
+              : k === 'ma_phong'
+              ? lists.rooms.find((room: Row) => room._id === r[k])?.ten_phong
+              : k === 'ma_toa_nha'
               ? lists.buildings.find((b: Row) => b._id === r[k])?.ten_toa_nha
               : r[k],
           ),
           <div className="actions">
+            {kind === 'devices' && <button onClick={() => setup(r)}>Kết nối ESP</button>}
             <button onClick={() => edit(kind, r)}>Sửa</button>
             <button
               className="danger"
@@ -1706,11 +1805,12 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
         fixed: true,
       },
       { key: 'ten_thiet_bi', label: 'Tên thiết bị' },
-      { key: 'dia_chi_mac', label: 'Địa chỉ MAC', hint: 'AA:BB:CC:DD:EE:FF' },
+      { key: 'dia_chi_mac', label: 'Địa chỉ MAC (không bắt buộc)', optional: true, hint: 'Demo Wokwi có thể để trống. ESP được nhận diện bằng mã thiết bị và MQTT topic.' },
       {
         key: 'chu_de_mqtt',
         label: 'MQTT topic gốc',
-        hint: 'campus/building_a/device_01',
+        hint: 'Để trống để hệ thống tạo topic riêng, tránh trùng ESP khác.',
+        optional: true,
         fixed: true,
       },
       {
@@ -1840,7 +1940,7 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
   const [form, setForm] = useState<Row>(() => ({
     ...{
       cong_suat_dinh_muc: 2000,
-      chu_ky_gui: 5,
+      chu_ky_gui: kind === 'devices' ? 2 : 5,
       cho_phep_dieu_khien: true,
       active: true,
       buildingIds: [],
