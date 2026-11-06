@@ -22,7 +22,7 @@ Các tình huống đã đạt:
 7. Nhận bản tin qua MQTT thật và chặn topic không thuộc thiết bị.
 8. Debounce, nhắc lại, snapshot và tự phục hồi theo số đo ổn định; API xác nhận thủ công đã bị gỡ. Kiểm thử bổ sung nằm trong `test/alert-lifecycle.test.ts`.
 9. Lệnh trả 202 đang chờ; ACK đúng mới xác nhận thành công.
-10. ACK sai mã bị bỏ qua; quá hạn thành thất bại; ACK muộn không xóa thất bại.
+10. ACK sai mã bị bỏ qua; quá hạn thành Chưa xác định; ACK muộn cập nhật kết quả theo phản hồi thiết bị.
 11. Thiết bị offline không được ghi thành công giả.
 12. Lịch đến giờ thực hiện một lần; lịch tắt không chạy; chặn lịch xung đột.
 13. Tính lại điện năng khi mẫu đến trễ, không cộng trùng.

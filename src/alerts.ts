@@ -225,6 +225,16 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
       } });
     }
   }
+  async active(user: User) {
+    return this.db.collection('alerts').find({
+      ...this.security.buildingFilter(user), isOpen: true,
+    }, { projection: {
+      _id: 1, ma_thiet_bi: 1, ma_phong: 1, buildingId: 1,
+      tinh_trang: 1, muc_do: 1, noi_dung_loi: 1,
+      thoi_gian_phat_hien: 1, 'snapshot.rule.ten_quy_tac': 1,
+    } }).sort({ thoi_gian_phat_hien: -1 }).toArray();
+  }
+
   async history(user: User, filter: any) {
     const query: any = { ...this.security.buildingFilter(user) };
     if (filter.id) query._id = String(filter.id);

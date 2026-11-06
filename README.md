@@ -61,7 +61,19 @@ docker compose ps
 | `manager` | `DEMO_PASSWORD` trong `.env` | Giám sát, cảnh báo, điều khiển, hẹn giờ ở tòa A |
 | `viewer` | `DEMO_PASSWORD` trong `.env` | Chỉ xem dữ liệu tòa A |
 
-Dữ liệu khởi tạo: 1 tòa nhà, 1 tầng, 3 phòng và 3 thiết bị. Container simulator gửi dữ liệu mỗi 5 giây, nhận lệnh và phản hồi ACK. Đây là số đo **mô phỏng**, không phải dữ liệu điện thực tế.
+Dữ liệu khởi tạo: 1 tòa nhà, 1 tầng, 3 phòng và 3 thiết bị. Simulator **không chạy mặc định** để tránh ghi đè dữ liệu từ ESP32; khi bật, nó gửi dữ liệu mỗi 5 giây, nhận lệnh và phản hồi ACK. Đây là số đo **mô phỏng**, không phải dữ liệu điện thực tế.
+
+Khi dùng ESP32 thật, dừng container simulator nếu trước đó đã bật:
+
+```powershell
+docker compose stop simulator
+```
+
+Muốn chạy lại simulator cho demo, bật riêng profile của nó:
+
+```powershell
+docker compose --profile simulator up -d simulator
+```
 
 Giao diện và API dùng chung cổng, được NestJS phục vụ trong container `api`. Không cần khởi động thêm frontend. Mật khẩu chỉ được seed khi tài khoản chưa tồn tại; sửa `.env` không tự đổi mật khẩu tài khoản đã có trong DB. Đổi mật khẩu trong màn hình Quản trị.
 
@@ -81,7 +93,7 @@ Biểu đồ điện năng cần ít nhất hai mẫu đo để tích phân. T�
 Sửa biến trong `.env`, rồi tạo lại simulator:
 
 ```powershell
-docker compose up -d --force-recreate simulator
+docker compose --profile simulator up -d --force-recreate simulator
 ```
 
 | Biến | Giá trị | Kết quả |
@@ -90,12 +102,12 @@ docker compose up -d --force-recreate simulator
 | `SIM_MODE` | `overload` | Công suất khoảng 2.4 kW khi bật, dùng để thử cảnh báo |
 | `SIM_MODE` | `duplicate` | Gửi mỗi telemetry hai lần, DB chỉ lưu một lần |
 | `SIM_ACK_MODE` | `normal` | ACK sau khoảng 150 ms |
-| `SIM_ACK_MODE` | `drop` | Relay đổi nhưng không ACK; lệnh hết hạn sau 5 giây |
+| `SIM_ACK_MODE` | `drop` | Relay đổi nhưng không ACK; sau 10 giây ghi Chưa xác định |
 | `SIM_ACK_MODE` | `wrong-id` | ACK sai mã lệnh, bị bỏ qua |
 | `SIM_ACK_MODE` | `mismatch` | ACK báo trạng thái không khớp, ghi thất bại |
-| `SIM_ACK_MODE` | `late` | ACK sau 6.5 giây; giữ kết quả timeout và ghi ACK muộn |
+| `SIM_ACK_MODE` | `late` | ACK sau 11.5 giây; cập nhật Chưa xác định thành kết quả ACK và ghi ACK muộn |
 
-Trong chế độ mất ACK, telemetry sau đó vẫn có thể cho biết relay đã đổi; điều này không biến lệnh timeout thành thành công. Trạng thái lệnh và trạng thái thiết bị là hai thông tin khác nhau.
+Trong chế độ mất ACK, telemetry vẫn có thể cho biết relay đã đổi; lệnh giữ trạng thái Chưa xác định cho đến khi nhận ACK đúng mã. Không suy đoán thành công chỉ từ relay hoặc công suất bằng 0. ACK muộn cập nhật kết quả lệnh cũ nhưng không ghi đè trạng thái thiết bị của lệnh mới hơn.
 
 Thử offline:
 
@@ -206,7 +218,7 @@ Trong `firmware/`, sao chép `src/config.example.h` thành `src/config.h`, đi�
 
 Firmware hiện dùng GPIO 2 làm LED/relay demo và tạo số đo giả. Muốn đo thật phải thay phần đọc số đo bằng driver cảm biến/đồng hồ phù hợp, hiệu chuẩn và bổ sung phần cứng phản hồi. ACK của chương trình xác nhận GPIO/trạng thái do ESP32 báo; không độc lập chứng minh dòng điện tải đã ngắt.
 
-Compose mặc định chỉ mở MQTT ở `127.0.0.1` để chạy trên máy cá nhân. Khi kết nối ESP32 cùng LAN, đổi riêng dòng cổng MQTT thành `"1883:1883"`, giới hạn firewall cho mạng nội bộ, dùng địa chỉ IP LAN của máy. Wokwi cloud không tự truy cập được `localhost` của máy; cần Wokwi IoT Gateway hoặc một broker mà Wokwi truy cập được. File firmware chưa được biên dịch/nạp trên phần cứng trong lần bàn giao này.
+Compose mặc định chỉ mở MQTT ở `127.0.0.1` và không bật simulator để chạy ESP32 thật trên máy cá nhân. Khi kết nối ESP32 cùng LAN, đổi riêng dòng cổng MQTT thành `"1883:1883"`, giới hạn firewall cho mạng nội bộ, dùng địa chỉ IP LAN của máy. Wokwi cloud không tự truy cập được `localhost` của máy; cần Wokwi IoT Gateway hoặc một broker mà Wokwi truy cập được. File firmware chưa được biên dịch/nạp trên phần cứng trong lần bàn giao này.
 
 ## 9. Vận hành và giới hạn hiện tại
 

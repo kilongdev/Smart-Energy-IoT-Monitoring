@@ -45,7 +45,8 @@ export class Database implements OnModuleInit, OnModuleDestroy {
         { ma_tang: 1, ten_phong: 1 },
         { unique: true },
       ],
-      ['devices', { dia_chi_mac: 1 }, { unique: true }],
+      ['devices', { dia_chi_mac: 1 }, { name: 'unique_known_mac', unique: true,
+        partialFilterExpression: { dia_chi_mac: { $type: 'string' } } }],
       ['devices', { chu_de_mqtt: 1 }, { unique: true }],
       ['devices', { buildingId: 1 }, {}],
       [
@@ -102,6 +103,13 @@ export class Database implements OnModuleInit, OnModuleDestroy {
 
     for (const [collectionName, key, options] of indexes) {
       await this.collection(collectionName).createIndex(key, options);
+    }
+
+    // Establish uniqueness for known MACs before removing the old index,
+    // which allowed only one device without a MAC address.
+    const deviceIndexes = await this.collection('devices').listIndexes().toArray();
+    if (deviceIndexes.some(index => index.name === 'dia_chi_mac_1')) {
+      await this.collection('devices').dropIndex('dia_chi_mac_1');
     }
 
     await prepareAlertStorage(this);

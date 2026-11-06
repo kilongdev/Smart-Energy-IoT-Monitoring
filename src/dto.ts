@@ -74,12 +74,14 @@ export class DeviceDto {
   @MaxLength(120)
   ten_thiet_bi!: string;
 
+  @ValidateIf((_object, value) => value !== undefined)
   @Matches(/^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/)
-  dia_chi_mac!: string;
+  dia_chi_mac?: string;
 
+  @ValidateIf((_object, value) => value !== undefined)
   @Matches(/^campus\/[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*$/)
   @MaxLength(160)
-  chu_de_mqtt!: string;
+  chu_de_mqtt?: string;
 
   @IsBoolean()
   cho_phep_dieu_khien!: boolean;
@@ -230,10 +232,10 @@ export class AckDto {
   @IsISO8601({ strict: true })
   thoi_gian!: string;
 
-  @ValidateIf((_object, value) => value !== undefined)
+  @IsOptional()
   @IsString()
   @MaxLength(200)
-  loi?: string;
+  loi?: string | null;
 }
 
 export class RuleDto {

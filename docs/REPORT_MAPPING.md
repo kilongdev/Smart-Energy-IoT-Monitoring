@@ -9,7 +9,7 @@
 | FR05 Quy tắc | Rules UI/API | Ngưỡng, giờ qua đêm, duy trì, cooldown, bật/tắt |
 | FR06 Cảnh báo | Rule engine, Telegram worker | Gom cảnh báo mở, snapshot, log gửi, thử lại; Email chưa triển khai |
 | FR07 Xử lý | Alerts API/UI | Đang diễn ra → Đang phục hồi → Thông số đã phục hồi; lưu số đo và thời điểm phục hồi, không xác nhận thủ công |
-| FR08 Điều khiển | Control, MQTT, simulator | Lệnh có UUID, không retained, 5 giây timeout, ACK đúng mới thành công |
+| FR08 Điều khiển | Control, MQTT, simulator | Lệnh có UUID, không retained, 10 giây timeout, ACK đúng mới thành công |
 | FR09 Hẹn giờ | Schedules, schedule_runs | Giờ Việt Nam, kiểm tra từng giây, khóa lần chạy, không tự chạy bù |
 
 ## Chuyển TimescaleDB sang MongoDB
