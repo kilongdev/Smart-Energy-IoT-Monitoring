@@ -1,33 +1,3 @@
-# Smart Energy IoT Monitoring
-
-Smart Energy & Equipment IoT Monitoring Platform for Campus & Buildings.
-
-## Project Structure
-
-```text
-Smart-Energy-IoT-Monitoring/
-│
-├── frontend/              # React frontend
-│   ├── src/
-│   ├── public/
-│   └── package.json
-│
-├── backend/               # Node.js + Express backend
-│   ├── src/
-│   ├── package.json
-│   └── .env.example
-│
-├── simulator/             # ESP32 / sensor simulator
-│   ├── simulator.py
-│   └── requirements.txt
-│
-├── database/              # Database configuration and scripts
-│
-├── docs/                  # Project documentation
-│
-├── .gitignore
-├── README.md
-└── docker-compose.yml
 # Smart Energy IoT
 
 Dự án theo báo cáo của Nhóm 19 – 1A: giám sát điện năng tòa nhà, cảnh báo và điều khiển thiết bị. Backend **NestJS 11 + MongoDB**, giao diện **React + ECharts**, truyền dữ liệu **MQTT**, cập nhật **Socket.IO**.
@@ -223,11 +193,158 @@ docker compose down
 
 Nếu cổng 3000 bị chiếm, đổi `PORT=3001` trong `.env`, chạy `docker compose up -d`, mở `http://localhost:3001`. Nếu MongoDB báo Authentication failed sau khi đổi mật khẩu trong `.env`, kiểm tra mật khẩu tài khoản đã tồn tại trong volume; biến khởi tạo chỉ có tác dụng khi DB được tạo lần đầu.
 
-## 10. Tài liệu kỹ thuật đã đối chiếu
+## 10. Triển khai lên Render
+
+Dự án chạy trên Render dưới dạng **Web Service** (Node.js). Backend, giao diện React và Swagger đều dùng chung một tiến trình trên cùng cổng.
+
+### 10.1. Chuẩn bị trước khi deploy
+
+| Thành phần | Ghi chú |
+|---|---|
+| GitHub/GitLab | Render kết nối qua Git provider. Repo phải chứa `package.json` ở thư mục gốc. |
+| MongoDB | Dùng **MongoDB Atlas** (gói M0 miễn phí). Render không có MongoDB miễn phí có đĩa bền. |
+| MQTT broker | Dùng broker cloud (EMQX Cloud, HiveMQ Cloud, hoặc broker công cộng `broker.emqx.io` cho demo). |
+| Node.js | Dự án pin `22.23.4` qua file `.node-version`. Cần ≥ 22.9 vì `npm start` dùng cờ `--env-file-if-exists`. |
+
+### 10.2. Đưa code lên Git
+
+Thư mục `Smart-Energy-IoT-Monitoring-main` chính là thư mục gốc của repo:
+
+```powershell
+cd Smart-Energy-IoT-Monitoring-main
+git init
+git add .
+git commit -m "Smart Energy IoT"
+git branch -M main
+git remote add origin https://github.com/<user>/<repo>.git
+git push -u origin main
+```
+
+`.gitignore` đã loại `node_modules/`, `dist/`, `public/assets/` và `.env`, nên không push mật khẩu thật lên GitHub.
+
+### 10.3. Tạo MongoDB Atlas
+
+1. Đăng ký [MongoDB Atlas](https://www.mongodb.com/atlas), tạo cluster gói **M0 (Free)**.
+2. Chọn provider gần Render nhất. Nếu Render đặt ở `singapore` thì chọn AWS `Singapore`; Render đặt ở `oregon`/`ohio`/`virginia` thì chọn AWS tương ứng.
+3. **Database Access** → tạo user (ví dụ `smartenergy`) và password.
+4. **Network Access** → thêm IP của Render. Render free dùng IP dải dùng chung theo region:
+   - Mở service trên Render → **Connect** → tab **Outbound** → copy dải CIDR.
+   - Thêm từng dải vào Atlas IP Access List.
+   - Nếu không muốn chờ IP dải dùng chung, dùng `0.0.0.0/0` (Atlas sẽ cảnh báo, chỉ nên dùng cho đồ án demo).
+5. **Connect** → chọn driver **Node.js** → copy connection string dạng `mongodb+srv://...`.
+
+### 10.4. Tạo MQTT broker
+
+Các lựa chọn miễn phí:
+
+- **EMQX Cloud Serverless** — miễn phí vĩnh viễn (1M session phút/tháng, 1 GB lưu lượng). Có username/password và TLS.
+- **HiveMQ Cloud** — gói free 100 kết nối, 10 GB/tháng. Lưu ý HiveMQ Cloud Serverless sẽ ngừng hoạt động từ 31/12/2026.
+- **Broker công cộng `broker.emqx.io:1883`** — không cần đăng ký, nhưng mọi người đều đọc được tin nhắn. Chỉ dùng để demo với dữ liệu mô phỏng.
+
+Broker cần cho phép topic `campus/#` và các topic `campus/demo/+/telemetry`, `/ack`, `/command`, `/config`.
+
+### 10.5. Deploy trên Render
+
+**Cách A — dùng Blueprint (khuyến nghị):**
+
+1. Render Dashboard → **New** → **Blueprint**.
+2. Chọn repo đã push → Render đọc file `render.yaml`.
+3. Render hiển thị các biến cần nhập tay:
+   - `MONGO_URI` — connection string Atlas
+   - `ADMIN_PASSWORD`, `DEMO_PASSWORD` — mật khẩu ≥ 10 ký tự
+   - `MQTT_URL`, `MQTT_USERNAME`, `MQTT_PASSWORD`, `SIM_MQTT_PASSWORD`
+   - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (để trống nếu không dùng Telegram)
+4. Bấm **Apply**. Render build và deploy.
+
+**Cách B — tạo Web Service thủ công:**
+
+| Trường trong Render | Giá trị |
+|---|---|
+| Runtime | Node |
+| Build Command | `npm ci --include=dev --no-audit --no-fund && npm run build` |
+| Start Command | `npm start` |
+| Health Check Path | `/api/v1/health` |
+| Region | `singapore` (gần Việt Nam nhất) |
+| Plan | Free |
+
+Biến môi trường cần thêm (xem `.env.example` và `render.yaml`):
+
+```
+NODE_VERSION=22.23.4
+NODE_ENV=production
+MONGOMS_DISABLE_POSTINSTALL=true
+MONGO_URI=mongodb+srv://...
+MONGO_DB=smart_energy
+JWT_SECRET=<chuỗi ngẫu nhiên ≥ 32 ký tự>
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=<mật khẩu mạnh>
+DEMO_PASSWORD=<mật khẩu mạnh>
+SEED_DEMO=true
+MQTT_URL=mqtts://<broker-host>:8883
+MQTT_USERNAME=<tài khoản>
+MQTT_PASSWORD=<mật khẩu>
+SIM_MQTT_PASSWORD=<mật khẩu>
+```
+
+`JWT_SECRET` không cần nhập tay nếu dùng Blueprint — Render tự sinh bằng `generateValue: true`.
+
+### 10.6. Vì sao build command phải có `--include=dev`
+
+Render đặt `NODE_ENV=production` ngay cả khi build, khiến `npm ci` bỏ qua `devDependencies`. Mà `typescript` và `esbuild` đều nằm trong `devDependencies` — thiếu chúng thì `npm run build` lỗi với `TS2688: Cannot find type definition file for 'node'`.
+
+`MONGOMS_DISABLE_POSTINSTALL=true` ngăn `mongodb-memory-server` tải binary MongoDB khoảng 100 MB trong lúc build (binary này chỉ dùng cho test tích hợp).
+
+### 10.7. Kiểm tra sau khi deploy
+
+| Địa chỉ | Nội dung |
+|---|---|
+| `https://<app>.onrender.com/` | Giao diện React |
+| `https://<app>.onrender.com/docs` | Swagger UI |
+| `https://<app>.onrender.com/api/v1/health` | Kiểm tra sức khoẻ, trả `{"status":"ok","mqtt":true}` |
+
+Đăng nhập bằng `ADMIN_USERNAME` / `ADMIN_PASSWORD` đã khai trong Render.
+
+Nếu `health` trả `"mqtt": false`, kiểm tra log: MQTT URL sai, thiếu username/password, hoặc broker chưa cấp quyền topic `campus/#`.
+
+### 10.8. Nạp dữ liệu mô phỏng
+
+Render không chạy `compose.yaml`, nên container `simulator` trong Compose không tồn tại trên cloud. Để có dữ liệu điện mô phỏng:
+
+1. Chạy simulator từ máy local (cần Node 22), trỏ `MQTT_URL` về broker cloud:
+
+```powershell
+$env:MQTT_URL = "mqtts://<broker-host>:8883"
+$env:MQTT_USERNAME = "<tài khoản>"
+$env:MQTT_PASSWORD = "<mật khẩu>"
+$env:SIM_MQTT_PASSWORD = "<mật khẩu>"
+node scripts/simulator.mjs
+```
+
+2. Hoặc dùng API để nạp trực tiếp (cần token Admin):
+
+```
+POST https://<app>.onrender.com/api/v1/telemetry/ingest
+Authorization: Bearer <access_token>
+```
+
+### 10.9. Giới hạn của bản Free
+
+- Service ngủ sau **15 phút** không có truy cập; lần mở lại mất khoảng **1 phút** để khởi động lại.
+- Hệ thống file tạm, mọi thay đổi cục bộ mất khi redeploy hoặc restart.
+- Giới hạn 750 giờ chạy miễn phí mỗi tháng cho toàn workspace.
+- Chỉ có 1 instance, không scale được.
+- Dữ liệu nằm ở Atlas nên không mất khi service restart — nhưng chính sách của Atlas M0 có thể xoá cluster sau thời gian không hoạt động. Hãy sao lưu trước khi bàn giao.
+- WebSocket của Socket.IO có thể bị đứt khi service ngủ; giao diện có polling 5 giây nên vẫn tự cập nhật.
+
+## 11. Tài liệu kỹ thuật đã đối chiếu
 
 - NestJS MongoDB: https://docs.nestjs.com/v11/techniques/mongodb
 - NestJS Authentication: https://docs.nestjs.com/v11/techniques/authentication
 - MongoDB TTL: https://www.mongodb.com/docs/v8.0/core/index-ttl/
 - MongoDB time series indexes: https://www.mongodb.com/docs/manual/core/timeseries/timeseries-index/
+- Render Blueprint: https://render.com/docs/blueprint-spec
+- Render Node version: https://render.com/docs/node-version
+- Render free tier: https://render.com/docs/free
+- Render connect MongoDB Atlas: https://render.com/docs/connect-to-mongodb-atlas
 
 `package-lock.json` khóa phiên bản package dùng trong bản bàn giao. Không chứa `.env`, mật khẩu thật hoặc `node_modules` trong gói mã nguồn.

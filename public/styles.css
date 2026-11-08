@@ -684,15 +684,6 @@ footer {
 .form-grid select[multiple] {
   min-height: 95px;
 }
-.time-window {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.time-window input {
-  min-width: 0;
-  flex: 1;
-}
 .modal-actions {
   display: flex;
   justify-content: flex-end;
