@@ -10,24 +10,15 @@ the Docker backend.
    `libraries.txt`.
 2. Replace the placeholders in `sketch.ino` with the EMQX Cloud TLS host,
    username, and password.
-3. Use port `8883` and the seeded device values:
+3. Use port `8883`. Register a device on the dashboard and use **Kết nối ESP** to copy its ID/topic. Only use these example IDs if the demo devices were seeded:
    - ID: `44444444-4444-4444-8444-444444444444`
    - Topic: `campus/demo/device1`
 4. Configure the repository `.env` with the same broker:
 
 ```dotenv
-MQTT_URL=mqtts://k264d6cc.ala.asia-southeast1.emqxsl.com:8883
+MQTT_URL=mqtts://YOUR_EMQX_HOST:8883
 MQTT_USERNAME=your-emqx-username
 MQTT_PASSWORD=your-emqx-password
-```
-
-For the simulator container, use these optional overrides if the broker ACL
-separates device credentials:
-
-```dotenv
-SIM_MQTT_URL=mqtts://k264d6cc.ala.asia-southeast1.emqxsl.com:8883
-SIM_MQTT_USERNAME=your-emqx-username
-SIM_MQTT_PASSWORD=your-emqx-password
 ```
 
 Do not commit real credentials or publish them in a public Wokwi project.
@@ -48,7 +39,7 @@ The selected room in the dashboard determines where the backend stores telemetry
 1. Start the backend with `docker compose up -d --build`.
 2. Run the Wokwi simulation.
 3. Open the dashboard and select the seeded device.
-4. Confirm telemetry updates every five seconds.
+4. Confirm telemetry updates at SAMPLE_INTERVAL (the supplied sketch defaults to two seconds).
 5. Press **Bật** or **Tắt** in the dashboard.
 6. Confirm the relay LED changes and the command log receives a successful
    ACK.

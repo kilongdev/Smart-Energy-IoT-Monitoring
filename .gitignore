@@ -148,3 +148,5 @@ public/assets/
 coverage/
 *.log
 test-results/
+firmware/src/config.h
+firmware/.pio/

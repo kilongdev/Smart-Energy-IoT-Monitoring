@@ -1,6 +1,10 @@
 node_modules
 dist
 .env
+.env.*
+.cache
 .git
 test-results
 public/assets
+firmware/src/config.h
+firmware/.pio
