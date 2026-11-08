@@ -1,47 +1,54 @@
-# Kết quả kiểm tra bản bàn giao
+# Báo cáo kiểm tra trước khi push
 
-Ngày kiểm tra: 15/10/2026. Đây là kết quả quan sát trong môi trường xây dựng mã nguồn, không phải biên bản nghiệm thu trên máy triển khai.
+Ngày kiểm tra: **08/11/2026**, trên workspace hiện tại. Kết quả này không phải
+cam kết hiệu năng hoặc nghiệm thu phần cứng thực tế.
 
-## Đã thực hiện
-
-| Hạng mục | Kết quả | Phạm vi |
+| Kiểm tra | Kết quả | Phạm vi |
 |---|---|---|
-| `npm run build` | Đạt | TypeScript backend và đóng gói React/ECharts bằng esbuild |
-| `npm test` | 14/14 đạt, 0 lỗi | Domain, HTTP NestJS thật, MQTT TCP qua Aedes; MongoDB dùng test double |
-| Đọc `compose.yaml` bằng YAML parser | Đạt | Cấu trúc YAML có 4 service; chưa xác nhận bằng Docker Engine |
-| Swagger và trang chủ | HTTP kiểm thử đạt | Kiểm tra nội dung được phục vụ; chưa kiểm tra trình bày bằng trình duyệt |
+| Build | Đạt | TypeScript backend và đóng gói React |
+| Type-check frontend | Đạt | TypeScript kiểm tra riêng web/app.tsx |
+| npm test | 36/36 đạt | Domain, vòng đời cảnh báo, Telegram mock, HTTP/MQTT; DB dùng test double |
+| Integration MongoDB | 16/16 đạt | MongoDB 8.0.5 tạm, HTTP NestJS, MQTT qua Aedes, Telegram mock |
+| Compose mặc định và alias cloud | Đạt | docker compose config --quiet; không restart dịch vụ |
+| Setup/env | Đạt | Setup không ghi đè env cũ; đủ các key trong env mẫu |
+| Git diff --check | Đạt | Không có lỗi whitespace trong working tree và index khi kiểm tra |
 
-Các tình huống đã đạt:
+Integration chạy bằng binary đã cache:
 
-1. Khung giờ qua nửa đêm theo giờ Việt Nam và biên kết thúc.
-2. Tích phân điện năng, cắt ở biên giờ và bỏ khoảng mất dữ liệu dài.
-3. Online/offline theo ba chu kỳ, số đo 0 hợp lệ.
-4. JWT, vai trò Admin/QuanLy/NguoiXem và phạm vi tòa nhà ở server.
-5. CRUD, ràng buộc tham chiếu, PATCH giữ nguyên thuộc tính không gửi; từ chối chu kỳ `null`.
-6. Telemetry hợp lệ, chống trùng timestamp và từ chối dữ liệu sai.
-7. Nhận bản tin qua MQTT thật và chặn topic không thuộc thiết bị.
-8. Debounce, nhắc lại, snapshot và tự phục hồi theo số đo ổn định; API xác nhận thủ công đã bị gỡ. Kiểm thử bổ sung nằm trong `test/alert-lifecycle.test.ts`.
-9. Lệnh trả 202 đang chờ; ACK đúng mới xác nhận thành công.
-10. ACK sai mã bị bỏ qua; quá hạn thành Chưa xác định; ACK muộn cập nhật kết quả theo phản hồi thiết bị.
-11. Thiết bị offline không được ghi thành công giả.
-12. Lịch đến giờ thực hiện một lần; lịch tắt không chạy; chặn lịch xung đột.
-13. Tính lại điện năng khi mẫu đến trễ, không cộng trùng.
-14. Phục vụ Swagger và dashboard cùng API.
+```powershell
+$env:MONGOMS_DOWNLOAD_DIR = "$PWD/.cache/mongodb-binaries"
+node --test --test-concurrency=1 dist/test/integration.test.js
+```
 
-## Giới hạn của bằng chứng
+Sau khi sửa mã nguồn, build lại trước khi chạy lệnh này. Lệnh đầy đủ cho máy mới:
+`npm run test:integration` (có thể cần tải MongoDB binary).
 
-`test/memory-store.ts` thay lớp lưu trữ MongoDB trong bộ test mặc định. Nó hỗ trợ các thao tác cần cho tình huống kiểm thử nhưng không mô phỏng đầy đủ MongoDB; phương thức aggregate của test double trả mảng rỗng. Vì vậy không dùng kết quả này để khẳng định TTL, chỉ mục MongoDB, biểu đồ tổng hợp qua pipeline thật, độ bền dữ liệu hoặc hiệu năng đã được kiểm chứng.
+## Các tình huống được kiểm tra
 
-Đã thử `npm run test:integration` với MongoDB thật qua mongodb-memory-server. Tiến trình MongoDB kết thúc với mã 100, thông báo `open: Operation not permitted` trong bước initAndListen. Môi trường hiện tại chặn thao tác hệ điều hành mà MongoDB cần. Bộ integration test được giữ lại để chạy trên máy phù hợp.
+- Phân quyền tòa nhà; CRUD và từ chối dữ liệu sai.
+- Chuông chỉ hiển thị cảnh báo mở trong phạm vi được phép.
+- Thêm ESP không bắt buộc MAC/topic, vẫn kiểm tra MAC được nhập và tự tạo topic riêng.
+- Telemetry trùng timestamp, payload sai và topic giả mạo.
+- Cảnh báo, debounce, phục hồi ổn định, chống nhắc quá dày và thử lại Telegram.
+- ACK đúng/sai mã, sai relay, mất ACK thành Chưa xác định, ACK muộn, timestamp lệch và loi null.
+- Telemetry không được suy diễn thay cho ACK; ACK trùng không ghi đè relay.
+- Lịch không tạo lệnh trùng; tổng hợp điện năng tính lại khi mẫu đến trễ.
+- Swagger và trang chủ được phục vụ cùng API.
 
-Kiểm tra giao diện bằng Playwright chưa thực hiện được: không có browser binary; bước tải Chromium trả tệp không phải ZIP hợp lệ. Không có kết quả kiểm chứng trực quan hay thao tác giao diện end-to-end trong bản bàn giao này.
+## Kiểm tra trước khi commit
 
-Chưa chạy Docker Compose/Mosquitto trong Docker, Telegram thật, biên dịch/nạp ESP32, bài tải 50 thiết bị/10 phút, hoặc đo thời gian truy vấn 30 ngày. Không có token Telegram thật trong mã nguồn; việc gửi thông báo cần cấu hình và kiểm tra tại môi trường của người dùng.
+Đã quét file được track ở cả working tree và index, đối chiếu các secret đang có
+trong env và các mẫu URI/token thông dụng: chưa phát hiện giá trị bí mật thật.
+Đây không phải chứng nhận toàn bộ lịch sử Git không có secret.
 
-## Kiểm tra tiếp trên máy chạy dự án
+Env, env backup, .cache, firmware/src/config.h và firmware/.pio được ignore.
+Secret đã từng chia sẻ hoặc từng commit vẫn cần thay mới; xóa ở commit hiện tại
+không tự xóa khỏi lịch sử. Kiểm tra staged diff trước khi push.
 
-1. Chạy `node scripts/setup.mjs` rồi `docker compose up --build -d`; kiểm tra các container healthy.
-2. Theo mục 2 trong README: đăng nhập, xem số đo, điều khiển relay, đối chiếu ACK/nhật ký, tạo quy tắc và lịch.
-3. Chạy `npm ci`, `npm test`, `npm run test:integration` trên máy có thể chạy MongoDB binary.
-4. Thử các chế độ ACK lỗi, mất kết nối, gửi trùng trong README; kiểm tra dữ liệu vẫn còn sau khi khởi động lại container.
-5. Cấu hình Telegram để kiểm tra nhận tin; chỉ chạy load test sau khi hệ thống cơ bản hoạt động.
+## Chưa được chứng minh bởi lần chạy này
+
+- Hiệu năng hàng triệu document, tải 50 thiết bị hoặc độ trễ p95.
+- Kết nối phần cứng thật, biên dịch firmware hoặc xác minh relay vật lý.
+- Kiểm thử giao diện bằng trình duyệt end-to-end.
+- Nhận Telegram thật, MQTT EMQX thật hoặc deploy Render trong lần rà soát này.
+- Test double không chứng minh TTL, unique index và aggregation MongoDB; dùng bộ integration cho hành vi MongoDB thật.
