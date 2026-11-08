@@ -34,6 +34,7 @@ import { Schedules } from './schedules';
 import { Security, AccessGuard, AuthController } from './security';
 import { Seed } from './seed';
 import { Telemetry } from './telemetry';
+import { VirtualDevices } from './virtual-devices';
 
 @Catch()
 class Errors implements ExceptionFilter {
@@ -98,6 +99,7 @@ class Errors implements ExceptionFilter {
     Alerts,
     Telemetry,
     Mqtt,
+    VirtualDevices,
     Control,
     Schedules,
     Seed,
