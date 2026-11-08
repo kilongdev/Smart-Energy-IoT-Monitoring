@@ -167,10 +167,12 @@ export class Telemetry
           $set: {
             latest: {
               thoi_gian_do: row.thoi_gian_do,
+              receivedAt: row.receivedAt,
               cong_suat_w: row.cong_suat_w,
               dien_ap_v: row.dien_ap_v,
               dong_dien_a: row.dong_dien_a,
               nhiet_do_c: row.nhiet_do_c,
+              chi_tiet_mo_phong: row.chi_tiet_mo_phong,
             },
           },
         },
@@ -181,21 +183,21 @@ export class Telemetry
       {
         _id: device._id,
         $or: [
-          { lastRelayAt: { $lte: row.thoi_gian_do } },
+          { lastRelayAt: { $lte: row.receivedAt } },
           { lastRelayAt: { $exists: false } },
         ],
       },
       {
         $set: {
           trang_thai_relay: row.trang_thai_relay,
-          lastRelayAt: row.thoi_gian_do,
+          lastRelayAt: row.receivedAt,
         },
       },
     );
 
     if (
-      Date.now() - row.thoi_gian_do.getTime() <=
-      device.chu_ky_gui * 3000
+      Date.now() - row.receivedAt.getTime() <=
+      device.chu_ky_gui * 5000
     ) {
       await this.alerts.evaluate(device, row);
     }

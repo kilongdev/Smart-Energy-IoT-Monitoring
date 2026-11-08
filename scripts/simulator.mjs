@@ -1,5 +1,6 @@
+if (!process.env.MQTT_URL) throw new Error('Set MQTT_URL to the EMQX Cloud URL.');
 import mqtt from 'mqtt';
-const client=mqtt.connect(process.env.MQTT_URL||'mqtt://localhost:1883',{username:'energy_sim',password:process.env.SIM_MQTT_PASSWORD,clientId:'energy-simulator',clean:false,reconnectPeriod:2000});
+const client=mqtt.connect(process.env.MQTT_URL,{username:process.env.MQTT_USERNAME,password:process.env.MQTT_PASSWORD,clientId:'energy-simulator',clean:false,reconnectPeriod:2000});
 const state=Array.from({length:3},(_,i)=>({id:`44444444-4444-4444-8444-44444444444${4+i}`,topic:`campus/demo/device${i+1}`,relay:true,period:5,last:0,acks:new Map()}));
 client.on('connect',()=>{for(const d of state){client.subscribe(d.topic+'/command',{qos:1});client.subscribe(d.topic+'/config',{qos:1});}console.log('Simulator đã kết nối: 3 thiết bị');});
 client.on('error',e=>console.error('MQTT:',e.message));
@@ -13,7 +14,7 @@ client.on('message',(topic,bytes)=>{try{
  if(mode==='drop')return;
  const ack={ma_lenh:mode==='wrong-id'?'00000000-0000-4000-8000-000000000000':payload.ma_lenh,ma_thiet_bi:d.id,trang_thai_relay:mode==='mismatch'?!d.relay:d.relay,thoi_gian:new Date().toISOString()};
  d.acks.set(payload.ma_lenh,ack);if(d.acks.size>1000)d.acks.delete(d.acks.keys().next().value);
- setTimeout(()=>client.publish(d.topic+'/ack',JSON.stringify(ack),{qos:1}),mode==='late'?6500:150);
+ setTimeout(()=>client.publish(d.topic+'/ack',JSON.stringify(ack),{qos:1}),mode==='late'?11500:150);
 }catch(e){console.error(e.message);}});
 const timer=setInterval(()=>{if(!client.connected)return;for(let i=0;i<state.length;i++){
  const d=state[i];if(Date.now()-d.last<d.period*1000)continue;d.last=Date.now();

@@ -44,8 +44,9 @@ export class Mqtt implements OnApplicationBootstrap, OnModuleDestroy {
       return;
     }
 
+    if (!process.env.MQTT_URL) throw new Error('Thiếu MQTT_URL của EMQX trong cấu hình.');
     this.client = mqtt.connect(
-      process.env.MQTT_URL || 'mqtt://localhost:1883',
+      process.env.MQTT_URL,
       {
         clientId: 'smart-energy-backend',
         username: process.env.MQTT_USERNAME,

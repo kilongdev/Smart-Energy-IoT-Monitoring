@@ -53,7 +53,7 @@ Payload MQTT tối đa 4 KB; kiểu số phải là JSON number, relay phải l�
 
 ACK có thể có trường `loi` (chuỗi). Thiết bị phải đặt trạng thái cụ thể, không dùng toggle; từ chối lệnh đã hết hạn; nhận lệnh trùng thì gửi lại ACK. Simulator giữ cache mã lệnh gần nhất; firmware demo giữ lệnh gần nhất. Chưa có bộ nhớ chống trùng bền vững qua reboot của thiết bị.
 
-ACK sai thiết bị/topic/mã lệnh không hoàn tất lệnh. ACK báo relay không khớp ghi Thất bại. ACK muộn lưu riêng, không sửa kết quả timeout; chỉ đồng bộ trạng thái nếu thuộc lệnh mới nhất và không cũ hơn số đo relay đã có. Thời hạn 5 giây tính từ lúc backend tạo lệnh; bao gồm thời gian publish.
+ACK sai thiết bị/topic/mã lệnh không hoàn tất lệnh. ACK báo lỗi hoặc relay không khớp ghi Thất bại; `loi: null` nghĩa là không có lỗi. Sau 10 giây không có ACK, ghi Chưa xác định, không kết luận thất bại. ACK muộn được lưu và cập nhật kết quả Chưa xác định; chỉ đồng bộ trạng thái thiết bị nếu thuộc lệnh mới nhất. Thời hạn 10 giây tính từ lúc backend tạo lệnh, bao gồm thời gian publish. Đối chiếu ACK bằng UUID, thiết bị và topic; giữ timestamp ESP để chẩn đoán, dùng thời gian backend nhận để cập nhật trạng thái, tránh lệch đồng hồ ESP làm mất xác nhận. ACK trùng không cập nhật lại relay. Thành công xác nhận trạng thái relay do thiết bị báo về, không phải phép đo độc lập chứng minh tiếp điểm đã đóng/ngắt.
 
 ## Config
 
@@ -80,11 +80,12 @@ Tất cả dưới `/api/v1`; trừ login/health, cần header `Authorization: B
 | GET analytics/energy?from=&to=&period=day | Các vai trò |
 | GET/POST alerts/rules; PATCH alerts/rules/:id | Admin/Quản lý |
 | GET alerts/history?ma_phong=&muc_do=&trang_thai=&from=&to= | Admin/Quản lý |
-| PATCH alerts/history/:id/status | Admin/Quản lý |
 | POST control/devices/:id/switch | Admin/Quản lý |
 | GET control/logs, control/runs | Admin/Quản lý |
 | GET/POST control/schedules; PATCH/DELETE control/schedules/:id | Admin/Quản lý |
 | GET audit | Admin |
+
+Trạng thái sự cố do hệ thống cập nhật từ telemetry; endpoint PATCH `alerts/history/:id/status` đã bị gỡ. Quy tắc hỗ trợ `thoi_gian_phuc_hoi` (1–86400 giây, mặc định 30). Khoảng nhắc hiệu lực tối thiểu 300 giây. Xem [vòng đời cảnh báo](ALERT_LIFECYCLE.md).
 
 Socket.IO nhận `{auth:{token:access_token}}`. Sự kiện `telemetry` cho các vai trò trong cùng tòa nhà; `alert` và `command` chỉ Admin/Quản lý. Không truyền JWT trong URL.
 

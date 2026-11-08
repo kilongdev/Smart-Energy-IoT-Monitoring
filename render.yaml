@@ -59,7 +59,7 @@ services:
       - key: DEMO_PASSWORD
         sync: false
       - key: SEED_DEMO
-        value: "true"
+        value: "false"
 
       # --- MQTT ---
       # Dùng broker cloud, ví dụ mqtts://<host>:8883
@@ -69,13 +69,13 @@ services:
         sync: false
       - key: MQTT_PASSWORD
         sync: false
-      - key: SIM_MQTT_PASSWORD
-        sync: false
 
       # --- Telegram (tuỳ chọn) ---
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: DASHBOARD_URL
         sync: false
 
       # --- Chế độ demo ---

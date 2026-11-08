@@ -8,6 +8,7 @@ import {
   IsISO8601,
   IsNotEmpty,
   IsNumber,
+  IsObject,
   IsOptional,
   IsString,
   IsUUID,
@@ -73,12 +74,14 @@ export class DeviceDto {
   @MaxLength(120)
   ten_thiet_bi!: string;
 
+  @ValidateIf((_object, value) => value !== undefined)
   @Matches(/^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/)
-  dia_chi_mac!: string;
+  dia_chi_mac?: string;
 
+  @ValidateIf((_object, value) => value !== undefined)
   @Matches(/^campus\/[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*$/)
   @MaxLength(160)
-  chu_de_mqtt!: string;
+  chu_de_mqtt?: string;
 
   @IsBoolean()
   cho_phep_dieu_khien!: boolean;
@@ -147,8 +150,18 @@ export class TelemetryDto {
   @IsUUID()
   ma_thiet_bi!: string;
 
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  ma_phong?: string;
+
   @IsISO8601({ strict: true })
   thoi_gian_do!: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  uptime_s?: number;
 
   @IsNumber()
   @Min(0)
@@ -170,8 +183,40 @@ export class TelemetryDto {
   @Max(200)
   nhiet_do_c!: number;
 
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(1000)
+  dong_ro_ma?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  dien_nang_kwh?: number;
+
   @IsBoolean()
   trang_thai_relay!: boolean;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(10_000_000)
+  dinh_muc_w?: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  che_do_gia_lap?: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(1000)
+  so_thiet_bi_bat?: number;
+
+  @IsOptional()
+  @IsObject()
+  chi_tiet_mo_phong?: Record<string, number>;
 }
 
 export class AckDto {
@@ -187,10 +232,10 @@ export class AckDto {
   @IsISO8601({ strict: true })
   thoi_gian!: string;
 
-  @ValidateIf((_object, value) => value !== undefined)
+  @IsOptional()
   @IsString()
   @MaxLength(200)
-  loi?: string;
+  loi?: string | null;
 }
 
 export class RuleDto {
@@ -207,6 +252,7 @@ export class RuleDto {
     'dien_ap_v',
     'dong_dien_a',
     'nhiet_do_c',
+    'dong_ro_ma',
   ])
   chi_so_can_do!: string;
 
@@ -215,6 +261,10 @@ export class RuleDto {
 
   @IsNumber()
   gia_tri_nguong!: number;
+
+  @ValidateIf((_object, value) => value !== undefined && value !== null)
+  @IsNumber()
+  gia_tri_phuc_hoi?: number | null;
 
   @IsOptional()
   @Matches(/^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/)
@@ -225,6 +275,12 @@ export class RuleDto {
   @Min(0)
   @Max(86_400)
   thoi_gian_duy_tri?: number;
+
+  @ValidateIf((_object, value) => value !== undefined)
+  @IsInt()
+  @Min(1)
+  @Max(86_400)
+  thoi_gian_phuc_hoi?: number;
 
   @ValidateIf((_object, value) => value !== undefined)
   @IsInt()
@@ -271,16 +327,6 @@ export class ScheduleDto {
 export class UpdateScheduleDto extends PartialType(ScheduleDto, {
   skipNullProperties: false,
 }) {}
-
-export class AlertStateDto {
-  @IsIn(['Đã xác nhận', 'Đã xử lý'])
-  trang_thai!: string;
-
-  @ValidateIf((_object, value) => value !== undefined)
-  @IsString()
-  @MaxLength(1000)
-  ghi_chu?: string;
-}
 
 export class RangeDto {
   @IsISO8601({ strict: true })

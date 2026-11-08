@@ -109,6 +109,9 @@ export class Catalog {
       updatedAt: new Date(),
     };
 
+    if (kind === 'devices' && !data.chu_de_mqtt) {
+      data.chu_de_mqtt = `campus/devices/${data._id}`;
+    }
     await this.validate(kind, data);
 
     if (kind === 'users') {
@@ -292,7 +295,7 @@ export class Catalog {
     if (kind === 'devices') {
       const parent = await this.get('rooms', data.ma_phong);
       data.buildingId = parent.buildingId;
-      data.dia_chi_mac = data.dia_chi_mac.toUpperCase();
+      if (data.dia_chi_mac) data.dia_chi_mac = data.dia_chi_mac.toUpperCase();
     }
 
     if (kind === 'users') {
