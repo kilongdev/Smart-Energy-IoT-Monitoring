@@ -69,19 +69,19 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
       await locks.updateOne({ _id: device._id }, { $setOnInsert: { until: new Date(0) } }, { upsert: true });
     } catch (error: any) { if (error.code !== 11000) throw error; }
     const owner = randomUUID();
-    const deadline = Date.now() + 5000;
+    const deadline = Date.now() + 3000;
     let acquired = false;
     do {
       acquired = Boolean(await locks.findOneAndUpdate({ _id: device._id, until: { $lte: new Date() } },
-        { $set: { owner, until: new Date(Date.now() + 60_000) } }, { returnDocument: 'after' }));
+        { $set: { owner, until: new Date(Date.now() + 20_000) } }, { returnDocument: 'after' }));
       if (!acquired) await new Promise(resolve => setTimeout(resolve, 25));
     } while (!acquired && Date.now() < deadline);
     if (!acquired) throw new ConflictException('Thiết bị đang được đánh giá; mẫu đo sẽ được thử lại.');
     let lost = false;
     const heartbeat = setInterval(() => {
-      locks.updateOne({ _id: device._id, owner }, { $set: { until: new Date(Date.now() + 60_000) } })
+      locks.updateOne({ _id: device._id, owner }, { $set: { until: new Date(Date.now() + 20_000) } })
         .then(result => { if (!result.matchedCount) lost = true; }).catch(() => { lost = true; });
-    }, 10_000);
+    }, 5_000);
     try { await this.evaluateLocked(device, sample, () => {
       if (lost) throw new ConflictException('Mất quyền đánh giá thiết bị; thử lại mẫu đo.');
     }); } finally {

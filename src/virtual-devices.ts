@@ -38,6 +38,7 @@ export class VirtualDevices
   private client?: MqttClient;
   private timer?: NodeJS.Timeout;
   private refresher?: NodeJS.Timeout;
+  private busy = false;
   private readonly devices = new Map<string, VirtualState>();
   private readonly startedAt = Date.now();
   private readonly log = new Logger(VirtualDevices.name);
@@ -160,7 +161,10 @@ export class VirtualDevices
           'UNKNOWN',
         dinhMuc: row.cong_suat_dinh_muc || 4000,
         period,
-        last: kept?.last || 0,
+        // Rải pha publish lần đầu trong 1 chu kỳ để 15 gateway không dồn
+        // cùng 1 tick gây nghẽn đánh giá trên Atlas. Thiết bị giữ lại
+        // giữ nguyên tiến độ; chỉ thiết bị mới random pha.
+        last: kept?.last ?? Date.now() - Math.floor(Math.random() * period * 1000),
         relay: kept ? kept.relay : true,
         energy: kept ? kept.energy : 0.5 + Math.random() * 1.5,
         index,
@@ -251,49 +255,71 @@ export class VirtualDevices
   }
 
   private async tick() {
-    if (!this.client?.connected) return;
+    if (!this.client?.connected || this.busy) return;
 
-    const now = Date.now();
+    this.busy = true;
 
-    for (const state of this.devices.values()) {
-      if (now - state.last < state.period * 1000) continue;
-      state.last = now;
-
-      // Tải nền + nhiễu, tương tự sketch.ino nhưng gọn cho 15 phòng.
-      const base = 420 + ((state.index * 53) % 480);
-      const power = state.relay
-        ? Math.round((base + Math.random() * 90) * 10) / 10
-        : 0;
-      const voltage = Math.round((219 + Math.random() * 3) * 10) / 10;
-      const current =
-        Math.round(((power / (voltage * 0.95) || 0) * 100)) / 100;
-      const temperature =
-        Math.round((state.relay ? 31 + (state.index % 5) : 27) + Math.random() * 10) / 10;
-      const leak = Math.round((3 + Math.random() * 6) * 10) / 10;
-      state.energy += (power * state.period) / 3_600_000;
-      if (state.energy > 9999) state.energy = 0.5;
-
-      const payload = {
-        ma_thiet_bi: state.id,
-        ma_phong: state.roomCode,
-        thoi_gian_do: new Date().toISOString(),
-        uptime_s: Math.floor((now - this.startedAt) / 1000),
-        cong_suat_w: power,
-        dien_ap_v: voltage,
-        dong_dien_a: current,
-        nhiet_do_c: temperature,
-        dong_ro_ma: leak,
-        dien_nang_kwh: Math.round(state.energy * 10000) / 10000,
-        trang_thai_relay: state.relay,
-        dinh_muc_w: state.dinhMuc,
-        che_do_gia_lap: 'binh_thuong',
-      };
-
-      await this.client.publishAsync(
-        `${state.topic}/telemetry`,
-        JSON.stringify(payload),
-        { qos: 1 },
+    try {
+      const now = Date.now();
+      const due = [...this.devices.values()].filter(
+        (state) => now - state.last >= state.period * 1000,
       );
+
+      if (!due.length) return;
+
+      const results = await Promise.allSettled(
+        due.map(async (state) => {
+          // Tải nền + nhiễu, tương tự sketch.ino nhưng gọn cho 15 phòng.
+          const base = 420 + ((state.index * 53) % 480);
+          const power = state.relay
+            ? Math.round((base + Math.random() * 90) * 10) / 10
+            : 0;
+          const voltage = Math.round((219 + Math.random() * 3) * 10) / 10;
+          const current =
+            Math.round(((power / (voltage * 0.95) || 0) * 100)) / 100;
+          const temperature =
+            Math.round((state.relay ? 31 + (state.index % 5) : 27) + Math.random() * 10) / 10;
+          const leak = Math.round((3 + Math.random() * 6) * 10) / 10;
+          state.energy += (power * state.period) / 3_600_000;
+          if (state.energy > 9999) state.energy = 0.5;
+
+          const payload = {
+            ma_thiet_bi: state.id,
+            ma_phong: state.roomCode,
+            thoi_gian_do: new Date().toISOString(),
+            uptime_s: Math.floor((now - this.startedAt) / 1000),
+            cong_suat_w: power,
+            dien_ap_v: voltage,
+            dong_dien_a: current,
+            nhiet_do_c: temperature,
+            dong_ro_ma: leak,
+            dien_nang_kwh: Math.round(state.energy * 10000) / 10000,
+            trang_thai_relay: state.relay,
+            dinh_muc_w: state.dinhMuc,
+            che_do_gia_lap: 'binh_thuong',
+          };
+
+          await this.client!.publishAsync(
+            `${state.topic}/telemetry`,
+            JSON.stringify(payload),
+            { qos: 1 },
+          );
+
+          // Chỉ tính đã gửi khi publish thành công; thất bại giữ nguyên
+          // để tick sau retry ngay thay vì trễ thêm cả chu kỳ.
+          state.last = now;
+        }),
+      );
+
+      results.forEach((result, index) => {
+        if (result.status === 'rejected') {
+          this.log.warn(
+            `${due[index].roomCode}: publish thất bại: ${result.reason?.message || result.reason}`,
+          );
+        }
+      });
+    } finally {
+      this.busy = false;
     }
   }
 }
