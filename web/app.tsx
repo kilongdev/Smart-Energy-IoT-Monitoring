@@ -473,8 +473,9 @@ function App() {
   const visibleDevices = data.devices.filter(
     (d: Row) => !building || d.buildingId === building,
   );
-  const deviceId = selectedDevice || visibleDevices[0]?._id;
+  const deviceId = visibleDevices.some((d: Row) => d._id === selectedDevice) ? selectedDevice : visibleDevices[0]?._id;
   useEffect(() => {
+    setSamples([]);
     if (!user || !deviceId) return;
     let stop = false;
     async function fetchHistory() {
@@ -499,6 +500,7 @@ function App() {
   useEffect(() => {
     if (!user) return;
     let stop = false;
+    setEnergy([]);
     async function fetchEnergy() {
       try {
         const end = Math.floor(Date.now() / 3600000) * 3600000;
@@ -617,7 +619,7 @@ function App() {
   }
   const run = (...args: Parameters<typeof change>) =>
     change(...args).catch(() => {});
-  const edit = (kind: string, record?: Row) => setDialog({ kind, record });
+  const edit = (kind: string, record?: Row) => { setError(''); setDialog({ kind, record }); };
   if (authLoading)
     return <div className="loading">Đang kiểm tra phiên đăng nhập…</div>;
   if (!user) return <Login done={setUser} />;
@@ -1341,7 +1343,7 @@ function App() {
           </section>
         )}
         {tab === 'catalog' && (
-          <CatalogPage lists={lists} edit={edit} run={run} setup={setDeviceSetup} />
+          <CatalogPage building={building} lists={lists} edit={edit} run={run} setup={setDeviceSetup} />
         )}
         <footer>
           SMART ENERGY IOT <span>Giám sát · Cảnh báo · Điều khiển</span>
@@ -1644,14 +1646,26 @@ function DeviceSetup({ device, rooms, close }: { device: Row; rooms: Row[]; clos
   </div>;
 }
 
-function CatalogPage({ lists, edit, run, setup }: any) {
+function CatalogPage({ lists, edit, run, setup, building }: any) {
   const [kind, setKind] = useState('buildings');
+  const [deleting, setDeleting] = useState('');
+  const location = (r: Row) => {
+    const room = kind === 'rooms' ? r : lists.rooms?.find((x: Row) => x._id === r.ma_phong);
+    const floor = kind === 'floors' ? r : lists.floors?.find((x: Row) => x._id === room?.ma_tang);
+    const building = lists.buildings?.find((x: Row) => x._id === r.buildingId);
+    return { room, floor, building };
+  };
+  const rows = (lists[kind] || []).filter((r: Row) => {
+    if (!building) return true;
+    if (kind === 'users') return r.vai_tro === 'Admin' || (r.buildingIds || []).includes(building);
+    return (kind === 'buildings' ? r._id : r.buildingId) === building;
+  }).sort((a: Row, b: Row) => String(a.ten_toa_nha || a.ten_phong || a.ten_thiet_bi || a.tai_khoan || a.so_tang).localeCompare(String(b.ten_toa_nha || b.ten_phong || b.ten_thiet_bi || b.tai_khoan || b.so_tang), 'vi', { numeric: true }));
   const fields: Record<string, string[]> = {
     buildings: ['ten_toa_nha', 'dia_chi'],
     floors: ['so_tang', 'ma_toa_nha'],
-    rooms: ['ten_phong', 'loai_phong'],
+    rooms: ['ten_phong', 'ma_toa_nha', 'so_tang', 'loai_phong'],
     devices: ['ten_thiet_bi', 'ma_phong', 'online', 'chu_de_mqtt', 'chu_ky_gui'],
-    users: ['tai_khoan', 'ho_ten', 'vai_tro'],
+    users: ['tai_khoan', 'ho_ten', 'vai_tro', 'active'],
   };
   return (
     <section className="panel">
@@ -1691,19 +1705,22 @@ function CatalogPage({ lists, edit, run, setup }: any) {
                   tai_khoan: 'Tài khoản',
                   ho_ten: 'Họ tên',
                   vai_tro: 'Vai trò',
+                  active: 'Trạng thái',
                 }) as any
               )[k],
           ),
           'Thao tác',
         ]}
-        rows={(lists[kind] || []).map((r: Row) => [
+        rows={rows.map((r: Row) => [
           ...fields[kind].map((k) =>
-            k === 'online'
+            k === 'active' ? (r.active === false ? 'Đã khóa' : 'Hoạt động')
+              : k === 'so_tang' && kind === 'rooms' ? location(r).floor?.so_tang
+              : k === 'online'
               ? (r.online ? 'Online' : r.lastSeen ? 'Offline' : 'Chưa kết nối')
               : k === 'ma_phong'
               ? lists.rooms.find((room: Row) => room._id === r[k])?.ten_phong
               : k === 'ma_toa_nha'
-              ? lists.buildings.find((b: Row) => b._id === r[k])?.ten_toa_nha
+              ? lists.buildings.find((b: Row) => b._id === (r[k] || r.buildingId))?.ten_toa_nha
               : r[k],
           ),
           <div className="actions">
@@ -1711,15 +1728,18 @@ function CatalogPage({ lists, edit, run, setup }: any) {
             <button onClick={() => edit(kind, r)}>Sửa</button>
             <button
               className="danger"
-              onClick={() =>
-                confirm(
+              disabled={!!deleting || (kind === 'users' && r.active === false)}
+              onClick={async () => {
+                if (!confirm(
                   kind === 'users'
                     ? 'Khóa tài khoản này?'
                     : 'Xóa đối tượng này? Đối tượng có lịch sử sẽ không bị xóa.',
-                ) && run(kind + '/' + r._id, 'DELETE')
-              }
+                )) return;
+                setDeleting(r._id);
+                try { await run(kind + '/' + r._id, 'DELETE'); } finally { setDeleting(''); }
+              }}
             >
-              {kind === 'users' ? 'Khóa' : 'Xóa'}
+              {deleting === r._id ? 'Đang xử lý…' : kind === 'users' ? 'Khóa' : 'Xóa'}
             </button>
           </div>,
         ])}
@@ -1968,6 +1988,7 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
     setValidationError('');
     const payload: Row = {};
     for (const f of definitions[kind]) {
+      if (record && f.fixed) continue;
       if (f.type === 'time-window') {
         const start = form.khung_gio_bat_dau || '';
         const end = form.khung_gio_ket_thuc || '';
@@ -1982,7 +2003,13 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
         continue;
       }
       let v = form[f.key];
+      if (typeof v === 'string' && f.type !== 'password') v = v.trim();
+      if (!f.optional && !['checkbox', 'multiple', 'time-window'].includes(f.type || '') && (v === '' || v === undefined)) {
+        setValidationError('Vui lòng nhập ' + f.label.toLowerCase() + '.');
+        return;
+      }
       if (f.optional && (v === '' || v === undefined || v === null)) {
+        if (record && f.key === 'dia_chi') payload[f.key] = '';
         if (record && ['khung_gio_ap_dung', 'gia_tri_phuc_hoi'].includes(f.key)) payload[f.key] = null;
         continue;
       }
@@ -2005,7 +2032,7 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
           <h2>
             {record ? 'Chỉnh sửa' : 'Thêm'} {kindLabels[kind].toLowerCase()}
           </h2>
-          <button aria-label="Đóng" onClick={close}>
+          <button aria-label="Đóng" disabled={busy} onClick={close}>
             ×
           </button>
         </div>
@@ -2110,7 +2137,7 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
             <div className="error">{validationError || error}</div>
           )}
           <div className="modal-actions">
-            <button type="button" onClick={close}>
+            <button type="button" disabled={busy} onClick={close}>
               Hủy
             </button>
             <button className="primary" disabled={busy}>
