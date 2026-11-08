@@ -131,12 +131,35 @@ export class Mqtt implements OnApplicationBootstrap, OnModuleDestroy {
         }
 
         if (topic.endsWith('/ack')) {
+          // ACK hiếm nên giữ await để giữ thứ tự trước khi PUBACK.
           await this.ackHandler?.(dto as AckDto, topic);
+          done();
         } else {
-          await this.telemetry.ingest(dto, topic);
+          // Telemetry 15 gateway dồn cùng lúc: PUBACK ngay sau khi DTO
+          // hợp lệ rồi xử lý ingest nền, tránh hàng đợi MQTT nối tiếp
+          // làm bản tin sau chờ bản tin trước 10-20s. Bản tin lỗi DB
+          // vẫn nằm ở telemetry (processed:false) và được replay 5s/lần.
+          const copy = { ...json };
+          const telemetryTopic = topic;
+          done();
+          await this.telemetry.ingest(copy, telemetryTopic).catch(async (ingestError) => {
+            if (ingestError instanceof HttpException) {
+              await this.db
+                .audit('INVALID_MQTT', {
+                  topic: telemetryTopic,
+                  error: ingestError.message,
+                })
+                .catch(() => {});
+            } else {
+              this.log.error('Lỗi xử lý MQTT: ' + ingestError.message);
+            }
+          });
         }
       })()
-        .then(() => done())
+        .then(() => {
+          // Nhánh telemetry đã done() sớm; chỉ done() ở đây cho nhánh ACK.
+          if (topic.endsWith('/ack')) return;
+        })
         .catch(async (error) => {
           if (error instanceof HttpException) {
             await this.db

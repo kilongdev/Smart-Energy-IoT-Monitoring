@@ -44,8 +44,19 @@ export class Telemetry
     clearInterval(this.timer);
   }
 
-  ingest(dto: any, topic?: string) {
+  ingest(dto: any, topic?: string, markOnline = true) {
     const id = dto.ma_thiet_bi;
+
+    // Đánh dấu online ngay khi nhận bản tin hợp lệ (đã qua DTO validation
+    // ở tầng MQTT), không đợi hàng đợi xử lý xong. Đánh giá cảnh báo có
+    // thể tắc nghẽn phía sau nhưng thiết bị vẫn đang gửi dữ liệu.
+    // Bản tin replay lại dữ liệu cũ nên không được đánh dấu (markOnline=false).
+    if (markOnline) {
+      this.db.collection('devices').updateOne(
+        { _id: id },
+        { $set: { lastSeen: new Date() } },
+      ).catch(() => {});
+    }
 
     const work = (this.queues.get(id) || Promise.resolve())
       .catch(() => {})
@@ -250,7 +261,7 @@ export class Telemetry
         await this.ingest({
           ...dto,
           thoi_gian_do: row.thoi_gian_do.toISOString(),
-        });
+        }, undefined, false);
       }
     } finally {
       this.replaying = false;
