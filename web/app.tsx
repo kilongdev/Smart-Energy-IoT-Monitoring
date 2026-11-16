@@ -1,3 +1,4 @@
+import { HeatPlan } from './HeatPlan';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as echarts from 'echarts';
@@ -337,6 +338,8 @@ function App() {
     [schedules, setSchedules] = useState<Row[]>([]),
     [logs, setLogs] = useState<Row[]>([]);
   const [activeAlerts, setActiveAlerts] = useState<Row[]>([]);
+  const [alertsReady, setAlertsReady] = useState(false);
+  const [alertsLoadError, setAlertsLoadError] = useState('');
   const [deviceSetup, setDeviceSetup] = useState<Row | null>(null);
   const bellRef = useRef<HTMLDivElement>(null);
 
@@ -347,7 +350,7 @@ function App() {
     [error, setError] = useState(''),
     [dialog, setDialog] = useState<any>(null),
     [saving, setSaving] = useState(false);
-  const [building, setBuilding] = useState(''),
+  const [scopeFloor, setScopeFloor] = useState(''),
     [selectedDevice, setSelectedDevice] = useState(''),
     [samples, setSamples] = useState<Row[]>([]),
     [energy, setEnergy] = useState<Row[]>([]),
@@ -390,7 +393,7 @@ function App() {
     setUser(null);
     setTab('dashboard');
     setDialog(null);
-    setBuilding('');
+    setScopeFloor('');
     setSelectedDevice('');
   }, []);
   useEffect(() => {
@@ -435,9 +438,12 @@ function App() {
         setRules(r);
         setSchedules(s);
         setLogs(l);
+        setAlertsReady(true);
+        setAlertsLoadError('');
       }
     } catch (e: any) {
       setError(e.message);
+      setAlertsLoadError(e.message);
     }
   }, [user, admin, manager]);
   useEffect(() => {
@@ -470,8 +476,14 @@ function App() {
       socket.disconnect();
     };
   }, [user, load]);
+  const building = lists.floors?.find((f: Row) => f._id === scopeFloor)?.buildingId || '';
+  const inScope = (r: Row) => {
+    if (!scopeFloor) return true;
+    const roomId = r.ma_phong || lists.devices?.find((d: Row) => d._id === r.ma_thiet_bi)?.ma_phong;
+    return r.ma_tang === scopeFloor || lists.rooms?.some((room: Row) => room._id === roomId && room.ma_tang === scopeFloor);
+  };
   const visibleDevices = data.devices.filter(
-    (d: Row) => !building || d.buildingId === building,
+    (d: Row) => inScope(d),
   );
   const deviceId = visibleDevices.some((d: Row) => d._id === selectedDevice) ? selectedDevice : visibleDevices[0]?._id;
   useEffect(() => {
@@ -506,7 +518,7 @@ function App() {
         const end = Math.floor(Date.now() / 3600000) * 3600000;
         const days = period === 'day' ? 7 : period === 'week' ? 28 : 90;
         const r = await api(
-          `analytics/energy?from=${new Date(end - days * 86400000).toISOString()}&to=${new Date(end).toISOString()}&period=${period}${building ? '&buildingId=' + building : ''}`,
+          `analytics/energy?from=${new Date(end - days * 86400000).toISOString()}&to=${new Date(end).toISOString()}&period=${period}${scopeFloor ? '&floorId=' + scopeFloor : ''}`,
         );
         if (!stop) setEnergy(r.data);
       } catch (e: any) {
@@ -519,7 +531,7 @@ function App() {
       stop = true;
       clearInterval(t);
     };
-  }, [user, building, period]);
+  }, [user, scopeFloor, period]);
   useEffect(() => {
     if (notice) {
       const t = setTimeout(() => setNotice(''), 7000);
@@ -628,7 +640,7 @@ function App() {
     .reduce((s: number, d: Row) => s + (d.latest?.cong_suat_w || 0), 0);
   const selected = visibleDevices.find((d: Row) => d._id === deviceId);
   const selectedOnline = !!selected?.online;
-  const notifications = activeAlerts
+  const notifications = activeAlerts.filter(inScope)
       .map((item) => ({
         id: `alert-${item._id}`,
         title: item.snapshot?.rule?.ten_quy_tac || 'Cảnh báo năng lượng',
@@ -639,13 +651,14 @@ function App() {
       }));
   const notificationCount = notifications.length;
   const chartOption = {
-    animation: false,
+    animationDurationUpdate: 300,
     tooltip: { trigger: 'axis' },
     grid: { left: 52, right: 20, top: 28, bottom: 42 },
     xAxis: {
       type: 'time',
+      splitNumber: 6,
       axisLine: { lineStyle: { color: '#cad6d0' } },
-      axisLabel: { color: '#7c8983' },
+      axisLabel: { color: '#7c8983', hideOverlap: true, formatter: (v: number) => new Date(v).toLocaleTimeString('vi-VN') },
     },
     yAxis: {
       type: 'value',
@@ -656,6 +669,7 @@ function App() {
     series: [
       {
         type: 'line',
+        markLine: selected?.cong_suat_dinh_muc ? { symbol: 'none', lineStyle: { color: '#db8b8b', type: 'dashed' }, data: [{ yAxis: selected.cong_suat_dinh_muc, name: 'Định mức', label: { formatter: 'Định mức', position: 'insideEndTop', color: '#a34f4f', backgroundColor: '#fff', padding: [3, 5] } }] } : undefined,
         showSymbol: false,
         smooth: 0.2,
         lineStyle: { color: '#258369', width: 2.5 },
@@ -841,16 +855,16 @@ function App() {
           <div>
             <span className="muted">Phạm vi giám sát</span>
             <select
-              value={building}
+              value={scopeFloor}
               onChange={(e) => {
-                setBuilding(e.target.value);
+                setScopeFloor(e.target.value);
                 setSelectedDevice('');
               }}
             >
-              <option value="">Tất cả tòa nhà được cấp quyền</option>
-              {lists.buildings?.map((b: Row) => (
+              <option value="">Tất cả tầng được cấp quyền</option>
+              {lists.floors?.map((b: Row) => (
                 <option key={b._id} value={b._id}>
-                  {b.ten_toa_nha}
+                  {lists.buildings?.find((x: Row) => x._id === b.buildingId)?.ten_toa_nha} · Tầng {b.so_tang}
                 </option>
               ))}
             </select>
@@ -858,11 +872,12 @@ function App() {
           <span className="muted small">Cập nhật: {date(data.serverTime)}</span>
         </div>
         {tab === 'dashboard' && (
-          <>
-            <div className="metrics">
+          <div className="overview-page">
+            {!connected && <p className="connection-banner" role="status">Đang mất kết nối realtime · Số liệu có thể chưa cập nhật</p>}
+            <div className={'metrics' + (!data.serverTime ? ' loading-metrics' : '')} aria-busy={!data.serverTime}>
               <Metric
                 label="CÔNG SUẤT HIỆN TẠI"
-                value={fmt(power / 1000, 2)}
+                value={data.serverTime ? fmt(power / 1000, 2) : '?'}
                 unit="kW"
                 detail="Tổng công suất của các gateway phòng đang online"
                 featured
@@ -871,23 +886,23 @@ function App() {
                 label="PHÒNG ĐANG KẾT NỐI"
                 value={String(
                   data.heatmap.filter(
-                    (r: Row) => (!building || r.buildingId === building) && r.online,
+                    (r: Row) => (inScope(r)) && r.online,
                   ).length,
                 )}
                 unit={
                   '/ ' +
                   data.heatmap.filter(
-                    (r: Row) => !building || r.buildingId === building,
+                    (r: Row) => inScope(r),
                   ).length
                 }
                 detail="Phòng Online khi gateway nhận telemetry; mất dữ liệu quá 5 chu kỳ sẽ Offline"
               />
               <Metric
                 label="ĐIỆN NĂNG TRONG KỲ"
-                value={fmt(
+                value={energy.length ? fmt(
                   energy.reduce((s, x) => s + x.dien_nang_kwh, 0),
                   3,
-                )}
+                ) : '?'}
                 unit="kWh"
                 detail={
                   period === 'day'
@@ -899,21 +914,22 @@ function App() {
               />
               <Metric
                 label={manager ? 'CẢNH BÁO CHƯA XỬ LÝ' : 'PHÒNG GIÁM SÁT'}
+                danger={manager && activeAlerts.some(a => inScope(a))}
+                onClick={manager ? () => setTab('alert') : undefined}
                 value={String(
                   manager
-                    ? alerts.filter(
+                    ? activeAlerts.filter(
                         (x) =>
-                          x.tinh_trang !== 'Đã kết thúc' &&
-                          (!building || x.buildingId === building),
+                          (inScope(x)),
                       ).length
                     : data.heatmap.filter(
-                        (x: Row) => !building || x.buildingId === building,
+                        (x: Row) => inScope(x),
                       ).length,
                 )}
                 unit=""
                 detail={
                   manager
-                    ? 'Cần kiểm tra và xác nhận'
+                    ? 'Tự kết thúc khi thông số phục hồi · Xem cảnh báo'
                     : 'Trong phạm vi tài khoản'
                 }
               />
@@ -940,7 +956,7 @@ function App() {
                   </select>
                 </div>
                 {samples.length ? (
-                  <Chart option={chartOption} />
+                  <Chart height={320} option={chartOption} />
                 ) : (
                   <Empty text="Đang chờ dữ liệu từ gateway phòng…" />
                 )}
@@ -962,11 +978,11 @@ function App() {
                           {
                             type: 'gauge',
                             min: 0,
-                            max: selected?.cong_suat_dinh_muc || 2000,
+                            max: 100,
                             progress: {
                               show: true,
                               width: 12,
-                              itemStyle: { color: '#2f8b70' },
+                              itemStyle: { color: (selected?.latest?.cong_suat_w / selected?.cong_suat_dinh_muc) > .8 ? '#d45848' : (selected?.latest?.cong_suat_w / selected?.cong_suat_dinh_muc) > .5 ? '#d6a32d' : '#2f8b70' },
                             },
                             axisLine: {
                               lineStyle: { width: 12, color: [[1, '#edf2ee']] },
@@ -979,14 +995,14 @@ function App() {
                             detail: {
                               fontSize: 25,
                               color: '#183b30',
-                              formatter: '{value} W',
+                              formatter: '{value} %',
                               offsetCenter: [0, '10%'],
                             },
                             title: { show: false },
                             data: [
                               {
                                 value: Math.round(
-                                  selected?.latest?.cong_suat_w || 0,
+                                  (selected?.latest?.cong_suat_w || 0) / (selected?.cong_suat_dinh_muc || 2000) * 100,
                                 ),
                               },
                             ],
@@ -1096,6 +1112,7 @@ function App() {
                       {
                         type: 'bar',
                         barMaxWidth: 34,
+                        markLine: { symbol: 'none', data: [{ type: 'average', name: 'Trung bình' }], label: { formatter: 'Trung bình: {c}' } },
                         itemStyle: {
                           color: '#43967a',
                           borderRadius: [5, 5, 0, 0],
@@ -1109,52 +1126,14 @@ function App() {
                 <Empty text="Chưa có dữ liệu tổng hợp. Biểu đồ kỳ này chỉ tính các giờ đã kết thúc." />
               )}
             </section>
-          </>
+            <section className="panel recent-activity"><h2>Hoạt động gần đây</h2>{[
+              ...activeAlerts.filter(a => inScope(a)).map(a => ({ id: 'a'+a._id, time: a.thoi_gian_phat_hien, text: a.noi_dung_loi || 'Cảnh báo năng lượng' })),
+              ...logs.filter(l => inScope(l)).map(l => ({ id: 'l'+l._id, time: l.thoi_gian_thuc_hien, text: `${l.hanh_dong} · ${l.trang_thai}` })),
+              ...visibleDevices.filter(d => !d.online && d.lastSeen).map(d => ({ id: 'd'+d._id, time: d.lastSeen, text: `${d.ten_thiet_bi} · Offline (lần cuối nhận dữ liệu)` })),
+            ].sort((a,b) => +new Date(b.time)-+new Date(a.time)).slice(0,5).map(e => <div className="activity-row" key={e.id}><span>{e.text}</span><small>{date(e.time)}</small></div>)}<p className="muted small">Sự kiện từ dữ liệu hệ thống hiện có.</p></section>
+          </div>
         )}
-        {tab === 'map' && (
-          <section className="panel">
-            <div className="panel-head">
-              <div>
-                <h2>Bản đồ nhiệt theo phòng</h2>
-                <p className="muted">
-                  Màu theo tỷ lệ công suất hiện tại / tổng công suất định mức
-                </p>
-              </div>
-              <div className="legend">
-                <span>● &lt;50%</span>
-                <span>● 50–80%</span>
-                <span>● &gt;80%</span>
-              </div>
-            </div>
-            <div className="heatmap">
-              {data.heatmap
-                .filter((r: Row) => !building || r.buildingId === building)
-                .map((r: Row) => (
-                  <article
-                    key={r.ma_phong}
-                    className={'heat ' + r.muc_do_canh_bao}
-                  >
-                    <div>
-                      {r.ten_phong}
-                      <small>
-                        Tầng{' '}
-                        {
-                          lists.floors?.find((f: Row) => f._id === r.ma_tang)
-                            ?.so_tang
-                        }
-                      </small>
-                    </div>
-                    <strong>
-                      {fmt(r.tong_cong_suat_w / 1000, 2)} <small>kW</small>
-                    </strong>
-                    <span>
-                      {r.online ? 'Gateway phòng online' : 'Gateway phòng offline'}
-                    </span>
-                  </article>
-                ))}
-            </div>
-          </section>
-        )}
+        {tab === 'map' && <HeatPlan rooms={data.heatmap.filter((r: Row) => inScope(r))} floors={lists.floors || []} buildings={lists.buildings || []} devices={data.devices} alerts={activeAlerts} />}
         {tab === 'control' && (
           <>
             <p className="info-text">
@@ -1237,10 +1216,14 @@ function App() {
         )}
         {tab === 'alert' && (
           <AlertPage
+            activeAlerts={activeAlerts.filter(inScope)}
+            loading={!alertsReady}
+            loadError={alertsLoadError}
+            retry={load}
             alerts={alerts.filter(
-              (a) => !building || a.buildingId === building,
+              (a) => inScope(a),
             )}
-            rules={rules.filter((a) => !building || a.buildingId === building)}
+            rules={rules.filter((a) => inScope(a))}
             devices={data.devices}
             roomList={lists.rooms}
             edit={edit}
@@ -1271,7 +1254,7 @@ function App() {
                 'Thao tác',
               ]}
               rows={schedules
-                .filter((s) => !building || s.buildingId === building)
+                .filter((s) => inScope(s))
                 .map((s) => [
                   data.devices.find((d: Row) => d._id === s.ma_thiet_bi)
                     ?.ten_thiet_bi,
@@ -1324,7 +1307,7 @@ function App() {
                 'Chi tiết',
               ]}
               rows={logs
-                .filter((l) => !building || l.buildingId === building)
+                .filter((l) => inScope(l))
                 .map((l) => [
                   date(l.thoi_gian_thuc_hien),
                   data.devices.find((d: Row) => d._id === l.ma_thiet_bi)
@@ -1343,7 +1326,7 @@ function App() {
           </section>
         )}
         {tab === 'catalog' && (
-          <CatalogPage building={building} lists={lists} edit={edit} run={run} setup={setDeviceSetup} />
+          <CatalogPage scopeFloor={scopeFloor} inScope={inScope} building={building} lists={lists} edit={edit} run={run} setup={setDeviceSetup} />
         )}
         <footer>
           SMART ENERGY IOT <span>Giám sát · Cảnh báo · Điều khiển</span>
@@ -1379,9 +1362,9 @@ function App() {
     </div>
   );
 }
-function Metric({ label, value, unit, detail, featured = false }: any) {
+function Metric({ label, value, unit, detail, featured = false, danger = false, onClick }: any) {
   return (
-    <section className={'metric ' + (featured ? 'featured' : '')}>
+    <section className={'metric ' + (featured ? 'featured' : '') + (danger ? ' metric-danger' : '')} role={onClick ? 'button' : undefined} tabIndex={onClick ? 0 : undefined} onClick={onClick} onKeyDown={e => { if (onClick && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onClick(); } }}>
       <div className="metric-label">{label}</div>
       <div className="metric-number">
         {value}
@@ -1421,6 +1404,7 @@ function Table({ heads, rows }: any) {
   );
 }
 function AlertPage({
+  activeAlerts, loading, loadError, retry,
   alerts,
   rules,
   devices,
@@ -1431,12 +1415,52 @@ function AlertPage({
 }: any) {
   const [focusedAlert, setFocusedAlert] = useState(new URLSearchParams(location.search).get('alert') || ''),
     [severity, setSeverity] = useState(''),
-    [room, setRoom] = useState(''),
     [incidentState, setIncidentState] = useState(new URLSearchParams(location.search).has('alert') ? '' : 'active'),
     [since, setSince] = useState('');
-  const roomIds = [...new Set<string>(devices.map((d: Row) => d.ma_phong))];
+  const [search, setSearch] = useState('');
+  const [type, setType] = useState('');
+  const [detailId, setDetailId] = useState('');
+  const detailRef = useRef<HTMLDivElement>(null);
+  const merged: Row[] = [...new Map<string, Row>([...alerts, ...activeAlerts].map((a: Row) => [a._id, a] as [string, Row])).values()];
+  const isOpen = (a: Row) => a.isOpen ?? a.tinh_trang !== 'Đã kết thúc';
+  const ruleOf = (a: Row) => a.snapshot?.rule || rules.find((r: Row) => r._id === a.ma_quy_tac) || {};
+  const deviceName = (a: Row) => devices.find((d: Row) => d._id === a.ma_thiet_bi)?.ten_thiet_bi || a.ma_thiet_bi;
+  const roomName = (a: Row) => roomList.find((r: Row) => r._id === a.ma_phong)?.ten_phong || 'Chưa có thông tin phòng';
+  const sinceTime = since ? +new Date(since + 'T00:00:00+07:00') : 0;
+  const open: Row[] = activeAlerts;
+  const recovered = merged.filter(a => !isOpen(a) && (!since || +new Date(a.ket_thuc_luc || a.lastSeen) >= sinceTime));
+  const types = [...new Set(merged.map(a => ruleOf(a).ten_quy_tac).filter(Boolean))];
+  const visible = merged.filter(a =>
+    (!incidentState || (incidentState === 'active' ? isOpen(a) : incidentState === 'recovering' ? a.tinh_trang === 'Đang phục hồi' : !isOpen(a))) &&
+    (!focusedAlert || a._id === focusedAlert) && (!severity || a.muc_do === severity) &&
+    (!type || ruleOf(a).ten_quy_tac === type) && (!since || +new Date(a.thoi_gian_phat_hien) >= sinceTime) &&
+    `${roomName(a)} ${deviceName(a)} ${ruleOf(a).ten_quy_tac || ''}`.toLocaleLowerCase('vi').includes(search.trim().toLocaleLowerCase('vi'))
+  ).sort((a,b) => Number(isOpen(b))-Number(isOpen(a)) || Number(b.muc_do==='HIGH')-Number(a.muc_do==='HIGH') || +new Date(b.thoi_gian_phat_hien)-+new Date(a.thoi_gian_phat_hien));
+  useEffect(() => {
+    if (!detailId) return;
+    const trigger = document.activeElement as HTMLElement;
+    const key = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setDetailId('');
+      if (e.key === 'Tab') {
+        const nodes = detailRef.current?.querySelectorAll<HTMLElement>('button, [href], input, select, [tabindex="0"]');
+        if (!nodes?.length) return;
+        const first = nodes[0], last = nodes[nodes.length-1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    };
+    detailRef.current?.querySelector('button')?.focus();
+    document.addEventListener('keydown',key);
+    return () => { document.removeEventListener('keydown',key); trigger?.focus(); };
+  },[detailId]);
   return (
-    <>
+    <div className="alerts-page">
+      <div className={'metrics alerts-kpis' + (loading ? ' loading-metrics' : '')} aria-busy={loading}>
+        <Metric label="◉ CẢNH BÁO ĐANG HOẠT ĐỘNG" value={loading || loadError ? '—' : open.length} detail="Sự cố chưa phục hồi trong phạm vi" featured />
+        <Metric label="⚠ CẢNH BÁO NGHIÊM TRỌNG" value={loading || loadError ? '—' : open.filter(a => a.muc_do === 'HIGH').length} detail="Mức cao · Critical đang hoạt động" danger={open.some(a => a.muc_do === 'HIGH')} />
+        <Metric label="✓ ĐÃ PHỤC HỒI" value={loading || loadError ? '—' : recovered.length} detail={since ? 'Phục hồi từ ngày đã chọn · trong lịch sử đã tải' : 'Trong lịch sử đã tải'} />
+        <Metric label="⌁ THIẾT BỊ CÓ CẢNH BÁO" value={loading || loadError ? '—' : new Set(open.map(a => a.ma_thiet_bi)).size} detail="Thiết bị có ít nhất một sự cố đang hoạt động" />
+      </div>
       <section className="panel">
         <div className="panel-head">
           <div>
@@ -1446,6 +1470,7 @@ function AlertPage({
               Đây là kết luận theo dữ liệu đo, không phải xác nhận an toàn điện.
             </p>
           </div>
+          <span className="alert-count">{loading || loadError ? '—' : visible.length} sự cố</span>
         </div>
         <div className="filters">
           {focusedAlert && <button onClick={() => {
@@ -1454,6 +1479,7 @@ function AlertPage({
             history.replaceState(null, '', url);
           }}>Bỏ lọc mã sự cố</button>}
           <select
+            aria-label="Trạng thái sự cố"
             value={incidentState}
             onChange={(e) => setIncidentState(e.target.value)}
           >
@@ -1463,6 +1489,7 @@ function AlertPage({
             <option value="">Tất cả sự cố</option>
           </select>
           <select
+            aria-label="Mức độ cảnh báo"
             value={severity}
             onChange={(e) => setSeverity(e.target.value)}
           >
@@ -1477,15 +1504,6 @@ function AlertPage({
               </option>
             ))}
           </select>
-          <select value={room} onChange={(e) => setRoom(e.target.value)}>
-            <option value="">Tất cả phòng</option>
-            {roomIds.map((r) => (
-              <option key={r} value={r}>
-                {roomList.find((item: Row) => item._id === r)?.ten_phong ||
-                  `Phòng ${r}`}
-              </option>
-            ))}
-          </select>
           <label className="inline-label">
             Từ ngày
             <input
@@ -1494,7 +1512,21 @@ function AlertPage({
               onChange={(e) => setSince(e.target.value)}
             />
           </label>
+          <select aria-label="Loại sự cố" value={type} onChange={e=>setType(e.target.value)}><option value="">Tất cả loại sự cố</option>{types.map(t=><option key={t} value={t}>{t}</option>)}</select>
+          <input aria-label="Tìm phòng hoặc thiết bị" placeholder="Tìm phòng / thiết bị…" value={search} onChange={e=>setSearch(e.target.value)} />
         </div>
+        {loadError ? <div className="alert-empty error" role="alert"><strong>Không tải được dữ liệu cảnh báo</strong><p>{loadError}</p><button onClick={retry}>Thử lại</button></div> : loading ? <div className="alert-skeleton" role="status">Đang tải cảnh báo…</div> : visible.length ? <div className="incident-list">{visible.map(a => {
+          const r = ruleOf(a), value = a.snapshot?.sample?.[r.chi_so_can_do];
+          const tone = !isOpen(a) ? 'recovered' : a.muc_do === 'HIGH' ? 'critical' : 'warning';
+          return <article className={'incident-card '+tone} key={a._id}>
+            <span className="incident-symbol" aria-hidden="true">{isOpen(a)?'!':'✓'}</span>
+            <div className="incident-copy"><div className="incident-heading"><strong>{roomName(a)}</strong><span className={'incident-badge '+tone}>{a.muc_do==='HIGH'?'Nghiêm trọng':a.muc_do==='MEDIUM'?'Cảnh báo':'Thấp'}</span></div><p>{r.ten_quy_tac || 'Bất thường'} · {deviceName(a)}</p><small>{Number.isFinite(value) ? `Số đo gần nhất: ${fmt(value,2)} ${alertMetricUnits[r.chi_so_can_do] || ''} · ` : ''}{r.chi_so_can_do ? formatAlertCondition(r) : a.noi_dung_loi}</small></div>
+            <div className="incident-time"><span className={'incident-badge '+tone}>{!isOpen(a)?'Đã phục hồi':a.tinh_trang==='Đang phục hồi'?'Đang phục hồi':'Đang hoạt động'}</span><small>{date(a.thoi_gian_phat_hien)}</small>{a.monitoringPaused && <small>Quy tắc tạm dừng</small>}</div>
+            <button onClick={()=>setDetailId(a._id)}>Xem chi tiết</button>
+          </article>;
+        })}</div> : <div className="alert-empty"><span className="empty-check">✓</span><div><strong>Không có sự cố cần theo dõi</strong><p>Các thiết bị trong phạm vi giám sát hiện không có cảnh báo phù hợp với bộ lọc.</p></div></div>}
+        <p className="muted small">Danh sách theo lịch sử backend đã trả về; KPI đang hoạt động lấy từ danh sách sự cố mở. Thời gian hiển thị theo Việt Nam.</p>
+        {detailId && <div className="modal-backdrop" onClick={e=>{if(e.target===e.currentTarget)setDetailId('');}}><div className="modal alert-detail" ref={detailRef} role="dialog" aria-modal="true" aria-labelledby="alert-detail-title"><div className="panel-head"><h2 id="alert-detail-title">Chi tiết cảnh báo</h2><button aria-label="Đóng chi tiết" onClick={()=>setDetailId('')}>×</button></div>
         <Table
           heads={[
             'Thời điểm',
@@ -1503,19 +1535,7 @@ function AlertPage({
             'Tình trạng',
             'Telegram',
           ]}
-          rows={alerts
-            .filter(
-              (a: Row) =>
-                (!incidentState ||
-                  (incidentState === 'active'
-                    ? (a.isOpen ?? a.tinh_trang !== 'Đã kết thúc')
-                    : incidentState === 'recovering' ? a.tinh_trang === 'Đang phục hồi'
-                    : a.tinh_trang === 'Đã kết thúc')) &&
-                (!focusedAlert || a._id === focusedAlert) &&
-                (!severity || a.muc_do === severity) &&
-                (!room || a.ma_phong === room) &&
-                (!since || new Date(a.thoi_gian_phat_hien) >= new Date(since)),
-            )
+          rows={merged.filter((a: Row) => a._id === detailId)
             .map((a: Row) => [
                 <span className="wrap">
                   <span>Bắt đầu: {date(a.thoi_gian_phat_hien)}</span>
@@ -1550,6 +1570,7 @@ function AlertPage({
               </span>,
             ])}
         />
+        </div></div>}
       </section>
       <section className="panel">
         <div className="panel-head">
@@ -1559,11 +1580,11 @@ function AlertPage({
               Chỉ phát cảnh báo khi vi phạm đủ thời gian duy trì
             </p>
           </div>
-          <button className="primary" onClick={() => edit('rules')}>
+          <button className="primary" disabled={saving || loading || !!loadError} onClick={() => edit('rules')}>
             + Thêm quy tắc
           </button>
         </div>
-        <Table
+        {loading ? <div className="alert-skeleton" role="status">Đang tải quy tắc…</div> : loadError ? <p role="status">Quy tắc chưa được cập nhật. Vui lòng thử tải lại dữ liệu.</p> : <Table
           heads={[
             'Tên quy tắc',
             'Điều kiện',
@@ -1584,8 +1605,9 @@ function AlertPage({
             Math.max(r.cooldown || 300, 300) + ' giây',
             <Badge value={r.bat ? 'Đang bật' : 'Tạm dừng'} />,
             <div className="actions">
-              <button onClick={() => edit('rules', r)}>Sửa</button>
+              <button disabled={saving} onClick={() => edit('rules', r)}>Sửa</button>
               <button
+                disabled={saving}
                 onClick={() =>
                   run('alerts/rules/' + r._id, 'PATCH', { bat: !r.bat })
                 }
@@ -1594,9 +1616,9 @@ function AlertPage({
               </button>
             </div>,
           ])}
-        />
+        />}
       </section>
-    </>
+    </div>
   );
 }
 const kindLabels: Record<string, string> = {
@@ -1646,7 +1668,7 @@ function DeviceSetup({ device, rooms, close }: { device: Row; rooms: Row[]; clos
   </div>;
 }
 
-function CatalogPage({ lists, edit, run, setup, building }: any) {
+function CatalogPage({ lists, edit, run, setup, building, scopeFloor, inScope }: any) {
   const [kind, setKind] = useState('buildings');
   const [deleting, setDeleting] = useState('');
   const location = (r: Row) => {
@@ -1658,7 +1680,9 @@ function CatalogPage({ lists, edit, run, setup, building }: any) {
   const rows = (lists[kind] || []).filter((r: Row) => {
     if (!building) return true;
     if (kind === 'users') return r.vai_tro === 'Admin' || (r.buildingIds || []).includes(building);
-    return (kind === 'buildings' ? r._id : r.buildingId) === building;
+    if (kind === 'buildings') return r._id === building;
+    if (kind === 'floors') return r._id === scopeFloor;
+    return inScope(kind === 'rooms' ? { ...r, ma_phong: r._id } : r);
   }).sort((a: Row, b: Row) => String(a.ten_toa_nha || a.ten_phong || a.ten_thiet_bi || a.tai_khoan || a.so_tang).localeCompare(String(b.ten_toa_nha || b.ten_phong || b.ten_thiet_bi || b.tai_khoan || b.so_tang), 'vi', { numeric: true }));
   const fields: Record<string, string[]> = {
     buildings: ['ten_toa_nha', 'dia_chi'],
