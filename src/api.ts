@@ -141,12 +141,14 @@ export class MonitoringController {
   })
   @ApiQuery({ name: 'buildingId', required: false })
   @ApiQuery({ name: 'ma_phong', required: false })
+  @ApiQuery({ name: 'floorId', required: false })
   energy(
     @Query('from') from: string,
     @Query('to') to: string,
     @Query('period') period: string,
     @Query('buildingId') buildingId: string,
     @Query('ma_phong') roomId: string,
+    @Query('floorId') floorId: string,
     @Req() request: any,
   ) {
     return this.analytics.energy(
@@ -156,6 +158,7 @@ export class MonitoringController {
       request.user,
       buildingId,
       roomId,
+      floorId,
     );
   }
 

@@ -189,3 +189,11 @@ test('Tổng hợp điện năng được tính lại khi nhận mẫu đến tr
 test('Swagger và dashboard được phục vụ cùng API',async()=>{
  assert.equal((await fetch(base)).status,200);const docs=await fetch(base+'/docs-json');assert.equal(docs.status,200);const json:any=await docs.json();assert.ok(json.paths['/api/v1/control/devices/{id}/switch']);
 });
+
+test('Energy floor scope validates the selected floor instead of returning a building total',async()=>{
+ const to=hourStart(new Date()).toISOString();
+ const from=new Date(+new Date(to)-86400000).toISOString();
+ const query=`analytics/energy?from=${from}&to=${to}&period=day&floorId=`;
+ assert.equal((await request(query+IDS.floor,'GET',undefined,manager)).status,200);
+ assert.equal((await request(query+'99999999-9999-4999-8999-999999999999','GET',undefined,manager)).status,404);
+});
