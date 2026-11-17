@@ -908,7 +908,7 @@ function App() {
               ))}
             </select>
           </div>
-          <span className="muted small">Đồng bộ trang: {date(data.serverTime)}</span>
+          <span className="muted small">Thời Gian: {date(data.serverTime)}</span>
         </div>
         {tab === 'dashboard' && (
           <div className="overview-page">
