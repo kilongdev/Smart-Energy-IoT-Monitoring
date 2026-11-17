@@ -7,6 +7,7 @@ import { Events } from './events';
 import { Security } from './security';
 import { sendTelegram, telegramAlertText, telegramConfig, TelegramError } from './telegram';
 import { DELIVERY_LIFETIME_MS, inRecoveryRange, MAX_CLOCK_AHEAD_MS, MAX_SAMPLE_DELAY_MS, validRecoveryThreshold } from './alert-policy';
+import { realtimeTrace } from './realtime-trace';
 
 @Injectable()
 export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
@@ -86,6 +87,9 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
       floor ? 'Tầng ' + floor.so_tang : null, room?.ten_phong || device.ma_phong].filter(Boolean).join(' / ');
   }
   async evaluate(device: any, sample: any) {
+    realtimeTrace('alert.evaluate', { deviceId: device._id, sampleId: sample._id,
+      measuredAt: sample.thoi_gian_do, receivedAt: sample.receivedAt,
+      queueDelayMs: Date.now() - +new Date(sample.receivedAt || sample.thoi_gian_do) });
     const received = +new Date(sample.receivedAt || sample.thoi_gian_do);
     const measured = +new Date(sample.thoi_gian_do);
     if (!Number.isFinite(measured) || !Number.isFinite(received) ||
@@ -206,6 +210,8 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
               lastSeen: received, 'snapshot.sample': sample, monitoringPaused: false, recoveryInterruptedReason: null,
             } },
           );
+          realtimeTrace('alert.persisted', { alertId: alert._id, state: 'RECOVERED', changed: closed.modifiedCount,
+            receivedAt: received, measuredAt: measured });
           if (closed.modifiedCount) this.events.send(device.buildingId, 'alert', {
             id: alert._id, message: device.ten_thiet_bi + ': Thông số đã phục hồi theo quy tắc giám sát',
           }, true);
@@ -219,6 +225,8 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
           measuredAt: measured, receivedAt: received, lastValidSampleAt: measured,
           monitoringPaused: false, outsideWindow: !withinWindow, recoveryInterruptedReason: null,
         }, ...(!normal ? { $inc: { occurrences: 1 } } : {}) });
+        realtimeTrace('alert.persisted', { alertId: alert._id, state: normal ? 'RECOVERING' : 'ACTIVE',
+          receivedAt: received, measuredAt: measured });
         // Notify both directions, including a renewed violation during recovery.
         if (alert.measurementState !== (normal ? 'RECOVERING' : 'ACTIVE')) {
           this.events.send(device.buildingId, 'alert', { id: alert._id }, true);
@@ -253,6 +261,7 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
         });
         try { await alerts.insertOne(alert); }
         catch (error: any) { if (error.code === 11000) return; throw error; }
+        realtimeTrace('alert.persisted', { alertId: alert._id, state: 'ACTIVE', receivedAt: received, measuredAt: measured });
         measurementState = 'ACTIVE';
         this.events.send(device.buildingId, 'alert', { id: alert._id, message: alert.noi_dung_loi }, true);
       }

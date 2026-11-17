@@ -14,6 +14,7 @@ import { Database } from './database';
 import { AckDto, TelemetryDto } from './dto';
 import { Events } from './events';
 import { Telemetry } from './telemetry';
+import { realtimeTrace } from './realtime-trace';
 
 @Injectable()
 export class Mqtt implements OnApplicationBootstrap, OnModuleDestroy {
@@ -84,6 +85,7 @@ export class Mqtt implements OnApplicationBootstrap, OnModuleDestroy {
     // A DB error closes the connection without acknowledging so a
     // persistent session can replay.
     this.client.handleMessage = (packet, done) => {
+      const receivedAt = new Date();
       const topic = packet.topic;
 
       if (
@@ -141,8 +143,10 @@ export class Mqtt implements OnApplicationBootstrap, OnModuleDestroy {
           // vẫn nằm ở telemetry (processed:false) và được replay 5s/lần.
           const copy = { ...json };
           const telemetryTopic = topic;
+          realtimeTrace('mqtt.received', { deviceId: copy.ma_thiet_bi, measuredAt: copy.thoi_gian_do,
+            receivedAt, transportDelayMs: +receivedAt - Date.parse(copy.thoi_gian_do) });
           done();
-          await this.telemetry.ingest(copy, telemetryTopic).catch(async (ingestError) => {
+          await this.telemetry.ingest(copy, telemetryTopic, true, receivedAt).catch(async (ingestError) => {
             if (ingestError instanceof HttpException) {
               await this.db
                 .audit('INVALID_MQTT', {

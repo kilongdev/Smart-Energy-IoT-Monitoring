@@ -6,6 +6,8 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <esp_sntp.h>
+#include <sys/time.h>
 
 const char* WIFI_SSID = "Wokwi-GUEST";
 const char* WIFI_PASSWORD = "";
@@ -88,12 +90,25 @@ unsigned long lastOled = 0;
 unsigned long lastButton = 0;
 unsigned long lastBreaker = 0;
 
+volatile bool clockSynchronized = false;
+volatile unsigned long lastClockSync = 0;
+
+void onClockSync(struct timeval* value) {
+  lastClockSync = millis();
+  clockSynchronized = true;
+  Serial.printf("NTP synchronized: %lld\n", (long long)value->tv_sec);
+}
+
 String isoNow() {
-  time_t now = time(nullptr);
+  struct timeval current;
+  gettimeofday(&current, nullptr);
+  time_t now = current.tv_sec;
   struct tm utc;
   gmtime_r(&now, &utc);
   char value[32];
-  strftime(value, sizeof(value), "%Y-%m-%dT%H:%M:%S.000Z", &utc);
+  char seconds[24];
+  strftime(seconds, sizeof(seconds), "%Y-%m-%dT%H:%M:%S", &utc);
+  snprintf(value, sizeof(value), "%s.%03ldZ", seconds, (long)(current.tv_usec / 1000));
   return String(value);
 }
 
@@ -372,6 +387,12 @@ void sampleAndPublish() {
     Serial.println("!! CANH BAO: RO DIEN");
   }
 
+  // Keep local readings/alarms and energy integration running, but do not
+  // publish an unsynchronized clock. SNTP runs asynchronously; no reconnect.
+  if (!clockSynchronized || millis() - lastClockSync > 20000) {
+    Serial.println("Waiting for fresh NTP synchronization before telemetry publish");
+    return;
+  }
   JsonDocument document;
   document["ma_thiet_bi"] = DEVICE_ID;
   document["ma_phong"] = ROOM_ID;
@@ -442,6 +463,10 @@ Serial.println(WiFi.macAddress());
   Serial.println();
   Serial.println("WiFi da ket noi");
 
+  // Wokwi's simulated clock can advance slower than real wall time.
+  // Use SNTP's supported minimum interval (15 s), not repeated configTime().
+  sntp_set_sync_interval(15000);
+  sntp_set_time_sync_notification_cb(onClockSync);
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
   tls.setInsecure();
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
