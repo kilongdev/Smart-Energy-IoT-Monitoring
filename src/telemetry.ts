@@ -46,6 +46,7 @@ export class Telemetry
 
   ingest(dto: any, topic?: string, markOnline = true) {
     const id = dto.ma_thiet_bi;
+    const receivedAt = new Date();
 
     // Đánh dấu online ngay khi nhận bản tin hợp lệ (đã qua DTO validation
     // ở tầng MQTT), không đợi hàng đợi xử lý xong. Đánh giá cảnh báo có
@@ -60,7 +61,7 @@ export class Telemetry
 
     const work = (this.queues.get(id) || Promise.resolve())
       .catch(() => {})
-      .then(() => this.handle(dto, topic));
+      .then(() => this.handle(dto, topic, receivedAt));
 
     this.queues.set(id, work);
 
@@ -75,7 +76,7 @@ export class Telemetry
     return work;
   }
 
-  private async handle(dto: any, topic?: string) {
+  private async handle(dto: any, topic?: string, receivedAt = new Date()) {
     const device = await this.catalog.get(
       'devices',
       dto.ma_thiet_bi,
@@ -106,7 +107,7 @@ export class Telemetry
       ...dto,
       _id: randomUUID(),
       thoi_gian_do: measured,
-      receivedAt: now,
+      receivedAt,
       buildingId: device.buildingId,
       ma_phong: device.ma_phong,
       processed: false,
@@ -153,11 +154,6 @@ export class Telemetry
   }
 
   private async process(device: any, row: any) {
-    await this.analytics.dirty(
-      device._id,
-      row.thoi_gian_do,
-    );
-
     const updated = await this.db
       .collection('devices')
       .findOneAndUpdate(
@@ -206,13 +202,6 @@ export class Telemetry
       },
     );
 
-    if (
-      Date.now() - row.receivedAt.getTime() <=
-      device.chu_ky_gui * 5000
-    ) {
-      await this.alerts.evaluate(device, row);
-    }
-
     if (updated) {
       this.events.send(
         device.buildingId,
@@ -224,6 +213,13 @@ export class Telemetry
         },
       );
     }
+
+    // Publish the stored measurement before alert evaluation and rollups;
+    // neither may hold the dashboard behind a slow database round trip.
+    // Alert evaluation owns freshness validation and logs why stale samples
+    // cannot advance recovery. Do not silently discard them with another limit.
+    await this.alerts.evaluate(device, row);
+    await this.analytics.dirty(device._id, row.thoi_gian_do);
 
     await this.db.collection('telemetry').updateOne(
       { _id: row._id },

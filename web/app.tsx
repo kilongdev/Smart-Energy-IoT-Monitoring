@@ -1,4 +1,6 @@
 import { ControlPage } from './ControlPage';
+import { mergeAlertRecords, isAlertOpen } from './alert-records';
+import { updateLiveReading, preserveNewerReadings } from './live-readings';
 import { HeatPlan } from './HeatPlan';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -410,8 +412,10 @@ function App() {
     else setAuthLoading(false);
     return () => window.removeEventListener('energy-logout', logout);
   }, []);
+  const loadingRequest = useRef(false);
   const load = useCallback(async () => {
-    if (!user) return;
+    if (!user || loadingRequest.current) return;
+    loadingRequest.current = true;
     try {
       const names = [
         'buildings',
@@ -426,7 +430,7 @@ function App() {
         ...names.map((x) => api(x)),
       ]);
       setDeviceLoadError('');
-      setData(dash);
+      setData(current => preserveNewerReadings(dash, current));
       setActiveAlerts(active);
       setLists(Object.fromEntries(names.map((n, i) => [n, values[i]])));
       if (manager) {
@@ -450,6 +454,8 @@ function App() {
       setError(e.message);
       setAlertsLoadError(e.message);
       setDeviceLoadError(e.message);
+    } finally {
+      loadingRequest.current = false;
     }
   }, [user, admin, manager]);
   useEffect(() => {
@@ -463,10 +469,15 @@ function App() {
     socket.on('connect', () => setConnected(true));
     socket.on('disconnect', () => setConnected(false));
     const update = () => {
-      clearTimeout(refreshTimer.current);
-      refreshTimer.current = setTimeout(load, 250);
+      if (refreshTimer.current) return;
+      refreshTimer.current = setTimeout(() => { refreshTimer.current = null; load(); }, 250);
     };
-    socket.on('telemetry', update);
+    socket.on('telemetry', (sample: Row) => {
+      // The backend has already processed this reading. Display it immediately;
+      // the throttled reload updates aggregates without starving under traffic.
+      setData(previous => updateLiveReading(previous, sample));
+      update();
+    });
     socket.on('command', (command: any) => {
       showCommandResult(command);
       update();
@@ -479,6 +490,7 @@ function App() {
     return () => {
       clearInterval(timer);
       clearTimeout(refreshTimer.current);
+      refreshTimer.current = null;
       socket.disconnect();
     };
   }, [user, load]);
@@ -875,7 +887,7 @@ function App() {
               ))}
             </select>
           </div>
-          <span className="muted small">Cập nhật: {date(data.serverTime)}</span>
+          <span className="muted small">Đồng bộ trang: {date(data.serverTime)}</span>
         </div>
         {tab === 'dashboard' && (
           <div className="overview-page">
@@ -1354,13 +1366,15 @@ function AlertPage({
   const [type, setType] = useState('');
   const [detailId, setDetailId] = useState('');
   const detailRef = useRef<HTMLDivElement>(null);
-  const merged: Row[] = [...new Map<string, Row>([...alerts, ...activeAlerts].map((a: Row) => [a._id, a] as [string, Row])).values()];
-  const isOpen = (a: Row) => a.isOpen ?? a.tinh_trang !== 'Đã kết thúc';
+  // Active notifications are projections, not full incident records.
+  // Prefer history so Telegram delivery and recovery details are preserved.
+  const merged: Row[] = mergeAlertRecords(alerts, activeAlerts);
+  const isOpen = isAlertOpen;
   const ruleOf = (a: Row) => a.snapshot?.rule || rules.find((r: Row) => r._id === a.ma_quy_tac) || {};
   const deviceName = (a: Row) => devices.find((d: Row) => d._id === a.ma_thiet_bi)?.ten_thiet_bi || a.ma_thiet_bi;
   const roomName = (a: Row) => roomList.find((r: Row) => r._id === a.ma_phong)?.ten_phong || 'Chưa có thông tin phòng';
   const sinceTime = since ? +new Date(since + 'T00:00:00+07:00') : 0;
-  const open: Row[] = activeAlerts;
+  const open: Row[] = merged.filter(isOpen);
   const recovered = merged.filter(a => !isOpen(a) && (!since || +new Date(a.ket_thuc_luc || a.lastSeen) >= sinceTime));
   const types = [...new Set(merged.map(a => ruleOf(a).ten_quy_tac).filter(Boolean))];
   const visible = merged.filter(a =>
@@ -1450,11 +1464,13 @@ function AlertPage({
         </div>
         {loadError ? <div className="alert-empty error" role="alert"><strong>Không tải được dữ liệu cảnh báo</strong><p>{loadError}</p><button onClick={retry}>Thử lại</button></div> : loading ? <div className="alert-skeleton" role="status">Đang tải cảnh báo…</div> : visible.length ? <div className="incident-list">{visible.map(a => {
           const r = ruleOf(a), value = a.snapshot?.sample?.[r.chi_so_can_do];
+          const gateway = devices.find((d: Row) => d._id === a.ma_thiet_bi);
+          const liveValue = gateway?.latest?.[r.chi_so_can_do];
           const tone = !isOpen(a) ? 'recovered' : a.muc_do === 'HIGH' ? 'critical' : 'warning';
           return <article className={'incident-card '+tone} key={a._id}>
             <span className="incident-symbol" aria-hidden="true">{isOpen(a)?'!':'✓'}</span>
-            <div className="incident-copy"><div className="incident-heading"><strong>{roomName(a)}</strong><span className={'incident-badge '+tone}>{a.muc_do==='HIGH'?'Nghiêm trọng':a.muc_do==='MEDIUM'?'Cảnh báo':'Thấp'}</span></div><p>{r.ten_quy_tac || 'Bất thường'} · {deviceName(a)}</p><small>{Number.isFinite(value) ? `Số đo gần nhất: ${fmt(value,2)} ${alertMetricUnits[r.chi_so_can_do] || ''} · ` : ''}{r.chi_so_can_do ? formatAlertCondition(r) : a.noi_dung_loi}</small></div>
-            <div className="incident-time"><span className={'incident-badge '+tone}>{!isOpen(a)?'Đã phục hồi':a.tinh_trang==='Đang phục hồi'?'Đang phục hồi':'Đang hoạt động'}</span><small>{date(a.thoi_gian_phat_hien)}</small>{a.monitoringPaused && <small>Quy tắc tạm dừng</small>}</div>
+            <div className="incident-copy"><div className="incident-heading"><strong>{roomName(a)}</strong><span className={'incident-badge '+tone}>{a.muc_do==='HIGH'?'Nghiêm trọng':a.muc_do==='MEDIUM'?'Cảnh báo':'Thấp'}</span></div><p>{r.ten_quy_tac || 'Bất thường'} · {deviceName(a)}</p><small>{Number.isFinite(value) ? `Mẫu đánh giá sự cố: ${fmt(value,2)} ${alertMetricUnits[r.chi_so_can_do] || ''} · ` : ''}{r.chi_so_can_do ? formatAlertCondition(r) : a.noi_dung_loi}</small><small style={{display:'block'}}>Mẫu hợp lệ đo lúc: {date(a.measuredAt || a.snapshot?.sample?.thoi_gian_do)} · Nhận lúc: {date(a.receivedAt || a.lastSeen)}</small>{Number.isFinite(liveValue) && <small style={{display:'block'}}>Gateway {gateway?.online ? 'mới nhất' : 'lần cuối'}: {fmt(liveValue,2)} {alertMetricUnits[r.chi_so_can_do] || ''} · Đo lúc {date(gateway?.latest?.thoi_gian_do)} · Nhận lúc {date(gateway?.latest?.receivedAt)}</small>}{a.recoveryInterruptedReason && <small role="status" style={{display:'block',color:'var(--danger, #b54737)'}}>{a.recoveryInterruptedReason}</small>}</div>
+            <div className="incident-time"><span className={'incident-badge '+tone}>{!isOpen(a)?'Đã phục hồi':a.tinh_trang==='Đang phục hồi'?'Đang phục hồi':'Đang diễn ra'}</span><small>Phát sinh: {date(a.thoi_gian_phat_hien)}</small>{a.monitoringPaused && <small>Quy tắc tạm dừng</small>}</div>
             <button onClick={()=>setDetailId(a._id)}>Xem chi tiết</button>
           </article>;
         })}</div> : <div className="alert-empty"><span className="empty-check">✓</span><div><strong>Không có sự cố cần theo dõi</strong><p>Các thiết bị trong phạm vi giám sát hiện không có cảnh báo phù hợp với bộ lọc.</p></div></div>}
@@ -1482,6 +1498,7 @@ function AlertPage({
                 {a.supersededBy && <small>Đã gộp vào cảnh báo {a.supersededBy}</small>}
                 <small>{a.occurrences} lần ghi nhận</small>
                 <small>Số đo cập nhật: {date(a.lastSeen)}</small>
+                {a.recoveryInterruptedReason && <small>{a.recoveryInterruptedReason}</small>}
                 {a.tinh_trang !== 'Đã kết thúc' && a.lastSeen &&
                   Date.now() - +new Date(a.lastSeen) >
                     (devices.find((d: Row) => d._id === a.ma_thiet_bi)?.chu_ky_gui || 5) * 5000 &&

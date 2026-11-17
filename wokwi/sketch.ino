@@ -12,7 +12,7 @@ const char* WIFI_PASSWORD = "";
 const char* MQTT_HOST = "k264d6cc.ala.asia-southeast1.emqxsl.com";
 const int MQTT_PORT = 8883;
 const char* MQTT_USER = "dossdoss2k5";
-const char* MQTT_PASSWORD = "YOUR_EMQX_PASSWORD";
+const char* MQTT_PASSWORD = "60e9ca53cc4c25f84ffabeff9c85e438a5cbda5664f5893e600cbc565df93c7e";
 const char* DEVICE_ID = "44444444-4444-4444-8444-444444444444";
 const char* ROOM_ID = "A101";
 const char* TOPIC_BASE = "campus/demo/device1";
@@ -75,9 +75,6 @@ Adafruit_SSD1306 oled(128, 64, &Wire, -1);
 
 bool oledReady = false;
 bool relayState = true;
-String pendingAckPayload;
-unsigned long lastAckAttempt = 0;
-int ackAttemptsRemaining = 0;
 bool lastBreakerState = true;
 Mode currentMode = NORMAL;
 float energyKwh = 0;
@@ -116,9 +113,6 @@ float loadPower(int index, float noise) {
 
 void setRelay(bool enabled) {
   relayState = enabled;
-  if (!enabled) {
-    currentMode = NORMAL;
-  }
   digitalWrite(RELAY_PIN, enabled ? HIGH : LOW);
   Serial.printf(
     ">> Contactor phong: %s\n",
@@ -155,19 +149,7 @@ void publishAck(const char* commandId) {
 
   String payload;
   serializeJson(ack, payload);
-  pendingAckPayload = payload;
-  ackAttemptsRemaining = 3;
-  lastAckAttempt = millis() - 1000;
-}
-
-// PubSubClient publishes at QoS 0. Repeat the same immutable result;
-// the backend deduplicates by command id without operating the relay again.
-void flushAck() {
-  if (!mqtt.connected() || ackAttemptsRemaining <= 0 || millis() - lastAckAttempt < 1000) return;
-  lastAckAttempt = millis();
-  bool sent = mqtt.publish((String(TOPIC_BASE) + "/ack").c_str(), pendingAckPayload.c_str());
-  Serial.println(sent ? "ACK da gui" : "Gui ACK that bai");
-  ackAttemptsRemaining--;
+  mqtt.publish((String(TOPIC_BASE) + "/ack").c_str(), payload.c_str());
 }
 
 void onMqttMessage(char* topic, byte* bytes, unsigned int length) {
@@ -350,7 +332,7 @@ void sampleAndPublish() {
   if (relayState) {
     loadValues[LOAD_COUNT] = 500 * usage * noise;
     if (currentMode == OVERLOAD) {
-      loadValues[LOAD_COUNT] += 3500 * noise;
+      loadValues[LOAD_COUNT] += 2000 * noise;
     }
     switchedPower += loadValues[LOAD_COUNT];
   }
@@ -432,6 +414,8 @@ void setup() {
   Serial.println(
     "Go lenh: on | off | normal | qua_tai | sut_ap | tang_ap | ro_dien"
   );
+  Serial.print("MAC ESP32: ");
+Serial.println(WiFi.macAddress());
 
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, HIGH);
@@ -476,7 +460,6 @@ void loop() {
     connectMqtt();
   }
   mqtt.loop();
-  flushAck();
 
   readBreaker();
   readButtons();
