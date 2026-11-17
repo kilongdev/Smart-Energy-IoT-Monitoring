@@ -13,6 +13,8 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
   private timer?: NodeJS.Timeout;
   private sending = false;
   private nextTelegramSend = 0;
+  private checkingRecovery = false;
+  private readonly lastStaleWarning = new Map<string, number>();
   private readonly log = new Logger(Alerts.name);
   constructor(
     private readonly db: Database, private readonly events: Events,
@@ -21,9 +23,30 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
   onApplicationBootstrap() {
     this.timer = setInterval(() => {
       this.notifications().catch(error => this.log.error(error.message));
+      this.expireRecoveries().catch(error => this.log.error(error.message));
     }, 1000);
   }
   onModuleDestroy() { clearInterval(this.timer); }
+  private async interruptRecovery(query: any, reason: string) {
+    const collection = this.db.collection('alerts');
+    const rows = await collection.find({ ...query, isOpen: true, measurementState: 'RECOVERING' }).toArray();
+    for (const row of rows) {
+      const result = await collection.updateOne({ ...query, _id: row._id, isOpen: true,
+        measurementState: 'RECOVERING', lastSeen: row.lastSeen }, { $set: {
+        measurementState: 'ACTIVE', tinh_trang: 'Đang diễn ra', recoverySince: null,
+        recoveryStartedAt: null, recoveryInterruptedReason: reason,
+      } });
+      if (result.modifiedCount) this.events.send(row.buildingId, 'alert', { id: row._id }, true);
+    }
+  }
+  async expireRecoveries() {
+    if (this.checkingRecovery) return;
+    this.checkingRecovery = true;
+    try {
+      await this.interruptRecovery({ lastSeen: { $lt: new Date(Date.now() - MAX_SAMPLE_DELAY_MS) } },
+        'Gián đoạn phục hồi: quá 30 giây chưa có mẫu hợp lệ. Đang chờ dữ liệu mới.');
+    } finally { this.checkingRecovery = false; }
+  }
   async rules(user: User) {
     return this.db.collection('rules').find(this.security.buildingFilter(user)).sort({ createdAt: -1 }).toArray();
   }
@@ -63,6 +86,22 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
       floor ? 'Tầng ' + floor.so_tang : null, room?.ten_phong || device.ma_phong].filter(Boolean).join(' / ');
   }
   async evaluate(device: any, sample: any) {
+    const received = +new Date(sample.receivedAt || sample.thoi_gian_do);
+    const measured = +new Date(sample.thoi_gian_do);
+    if (!Number.isFinite(measured) || !Number.isFinite(received) ||
+      measured - received > MAX_CLOCK_AHEAD_MS || received - measured > MAX_SAMPLE_DELAY_MS ||
+      Date.now() - received > MAX_SAMPLE_DELAY_MS) {
+      if (Date.now() - (this.lastStaleWarning.get(device._id) || 0) >= 30_000) {
+        this.lastStaleWarning.set(device._id, Date.now());
+        this.log.warn(`Telemetry not eligible for alert evaluation: device=${device._id}, transportDelayMs=${received - measured}, queueDelayMs=${Date.now() - received}`);
+      }
+      if (Number.isFinite(measured) && Number.isFinite(received)) {
+        await this.interruptRecovery({ ma_thiet_bi: device._id,
+          lastSeen: { $lt: new Date(received) }, lastValidSampleAt: { $lt: new Date(measured) } },
+          'Gián đoạn phục hồi: thời gian mẫu đo không hợp lệ hoặc dữ liệu đến trễ. Đang chờ mẫu mới hợp lệ.');
+      }
+      return;
+    }
     // Persist the per-device mutex so separate API workers serialize evaluation.
     const locks = this.db.collection('alert_evaluation_locks');
     try {
@@ -91,7 +130,10 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
   }
 
   private async evaluateLocked(device: any, sample: any, checkLease: () => void) {
-    const rules = await this.db.collection('rules').find({ ma_thiet_bi: device._id, bat: true }).toArray();
+    const [rules, openAlerts] = await Promise.all([
+      this.db.collection('rules').find({ ma_thiet_bi: device._id, bat: true }).toArray(),
+      this.db.collection('alerts').find({ ma_thiet_bi: device._id, isOpen: true }).toArray(),
+    ]);
     const received = new Date(sample.receivedAt || sample.thoi_gian_do);
     const measured = new Date(sample.thoi_gian_do);
     const maxGap = device.chu_ky_gui * 5000;
@@ -102,21 +144,26 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
       +measured - +received > MAX_CLOCK_AHEAD_MS ||
       +received - +measured > MAX_SAMPLE_DELAY_MS ||
       Date.now() - +received > MAX_SAMPLE_DELAY_MS) return;
-    for (const rule of rules) {
+    // Rules are independent, but all samples for this device still share the lease.
+    // Wait for every rule before releasing it, including when one write fails.
+    const results = await Promise.allSettled(rules.map(async rule => {
       checkLease();
       if ((rule.lastSample && +received <= +rule.lastSample) ||
-        (rule.lastMeasured && +measured <= +rule.lastMeasured)) continue;
+        (rule.lastMeasured && +measured <= +rule.lastMeasured)) return;
       const alerts = this.db.collection('alerts');
-      let alert = await alerts.findOne({ ma_quy_tac: rule._id, ma_thiet_bi: device._id, isOpen: true },
-        { sort: { thoi_gian_phat_hien: -1 } });
+      let alert = openAlerts.find(row => row.ma_quy_tac === rule._id);
       const effective = alert ? { ...rule, ...alert.snapshot?.rule } : rule;
       const value = sample[effective.chi_so_can_do];
       if (!Number.isFinite(value)) {
-        await this.db.collection('rules').updateOne({ _id: rule._id }, { $set: { start: null, lastSample: null, lastMeasured: null } });
+        // An incomplete newer sample breaks continuity, but must retain the
+        // ordering cursor so an older retransmission cannot restart recovery.
+        await this.db.collection('rules').updateOne({ _id: rule._id, updatedAt: rule.updatedAt },
+          { $set: { start: null, lastSample: received, lastMeasured: measured, measurementState: alert ? 'ACTIVE' : 'NORMAL' } });
         if (alert) await alerts.updateOne({ _id: alert._id }, { $set: {
           recoverySince: null, recoveryStartedAt: null, measurementState: 'ACTIVE', tinh_trang: 'Đang diễn ra', trang_thai: 'Đang theo dõi',
         } });
-        continue;
+        if (alert?.measurementState === 'RECOVERING') this.events.send(device.buildingId, 'alert', { id: alert._id }, true);
+        return;
       }
       const continuous = Boolean(rule.lastSample && rule.lastMeasured &&
         +received - +rule.lastSample <= maxGap && +measured - +rule.lastMeasured <= maxGap);
@@ -127,12 +174,15 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
         ...rules.filter(r => r.chi_so_can_do === effective.chi_so_can_do)];
       const normal = inRecoveryRange(value, effective) && bounds.every(r => inRecoveryRange(value, r));
       const start = withinWindow && violation ? (continuous && rule.start ? rule.start : received) : null;
+      let measurementState = alert ? (normal ? 'RECOVERING' : 'ACTIVE') : start ? 'PENDING' : 'NORMAL';
       const updated = await this.db.collection('rules').updateOne(
         { _id: rule._id, updatedAt: rule.updatedAt },
-        { $set: { start, lastSample: received, lastMeasured: measured,
-          lastValidSampleAt: measured, measurementState: alert ? (normal ? 'RECOVERING' : 'ACTIVE') : start ? 'PENDING' : 'NORMAL' } },
+        { $set: { start } },
       );
-      if (!updated.matchedCount) continue;
+      if (!updated.matchedCount) return;
+      // Do not advance the ordering cursor until incident persistence succeeds.
+      // Otherwise replay skips a sample whose alert write failed.
+      await (async () => {
       if (alert) {
         const recoverySeconds = Math.max(1, Number(effective.thoi_gian_phuc_hoi) || 30);
         const recoverySince = normal ? (continuous && alert.recoverySince ? alert.recoverySince : received) : null;
@@ -153,28 +203,31 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
               tinh_trang: 'Đã kết thúc', trang_thai: 'Đã phục hồi', resolvedBy: 'system',
               ket_thuc_luc: received, recoverySince, recoveryStartedAt: recoverySince, recoveryNotification,
               measuredAt: measured, receivedAt: received, lastValidSampleAt: measured,
-              lastSeen: received, 'snapshot.sample': sample, monitoringPaused: false,
+              lastSeen: received, 'snapshot.sample': sample, monitoringPaused: false, recoveryInterruptedReason: null,
             } },
           );
           if (closed.modifiedCount) this.events.send(device.buildingId, 'alert', {
             id: alert._id, message: device.ten_thiet_bi + ': Thông số đã phục hồi theo quy tắc giám sát',
           }, true);
-          await this.db.collection('rules').updateOne({ _id: rule._id, lastMeasured: measured }, { $set: { measurementState: 'NORMAL' } });
-          continue;
+          measurementState = 'NORMAL';
+          return;
         }
         await alerts.updateOne({ _id: alert._id }, { $set: {
           tinh_trang: normal ? 'Đang phục hồi' : 'Đang diễn ra', trang_thai: 'Đang theo dõi',
           recoverySince, recoveryStartedAt: recoverySince, recoverySeconds, lastSeen: received, 'snapshot.sample': sample,
           measurementState: normal ? 'RECOVERING' : 'ACTIVE',
           measuredAt: measured, receivedAt: received, lastValidSampleAt: measured,
-          monitoringPaused: false, outsideWindow: !withinWindow,
+          monitoringPaused: false, outsideWindow: !withinWindow, recoveryInterruptedReason: null,
         }, ...(!normal ? { $inc: { occurrences: 1 } } : {}) });
+        // Notify both directions, including a renewed violation during recovery.
+        if (alert.measurementState !== (normal ? 'RECOVERING' : 'ACTIVE')) {
+          this.events.send(device.buildingId, 'alert', { id: alert._id }, true);
+        }
         if (normal || !withinWindow) {
-          if (normal && !alert.recoverySince) this.events.send(device.buildingId, 'alert', { id: alert._id }, true);
-          continue;
+          return;
         }
       } else {
-        if (!start || +received - +start < rule.thoi_gian_duy_tri * 1000) continue;
+        if (!start || +received - +start < rule.thoi_gian_duy_tri * 1000) return;
         alert = {
           _id: randomUUID(), ma_quy_tac: rule._id, ma_thiet_bi: device._id,
           isOpen: true, lifecycleVersion: 2, measurementState: 'ACTIVE',
@@ -187,7 +240,7 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
             toan_tu: rule.toan_tu, gia_tri_nguong: rule.gia_tri_nguong,
             gia_tri_phuc_hoi: rule.gia_tri_phuc_hoi ?? null,
             thoi_gian_duy_tri: rule.thoi_gian_duy_tri, thoi_gian_phuc_hoi: rule.thoi_gian_phuc_hoi ?? 30, muc_do: rule.muc_do,
-          }, recoveryConditions: bounds.map(r => ({ toan_tu: r.toan_tu, gia_tri_nguong: r.gia_tri_nguong, gia_tri_phuc_hoi: r.gia_tri_phuc_hoi ?? null })), sample },
+          }, recoveryConditions: bounds.map(r => ({ toan_tu: r.toan_tu, gia_tri_nguong: r.gia_tri_nguong, gia_tri_phuc_hoi: r.gia_tri_phuc_hoi ?? null })), detectedSample: sample, sample },
           occurrences: 1, lastSeen: received, cooldown: Math.max(rule.cooldown || 300, 300),
           location: await this.location(device),
         };
@@ -199,12 +252,16 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
           deliveryDeadline: new Date(Date.now() + DELIVERY_LIFETIME_MS),
         });
         try { await alerts.insertOne(alert); }
-        catch (error: any) { if (error.code === 11000) continue; throw error; }
-        await this.db.collection('rules').updateOne({ _id: rule._id, lastMeasured: measured }, { $set: { measurementState: 'ACTIVE' } });
+        catch (error: any) { if (error.code === 11000) return; throw error; }
+        measurementState = 'ACTIVE';
         this.events.send(device.buildingId, 'alert', { id: alert._id, message: alert.noi_dung_loi }, true);
       }
       const now = new Date();
       const cooldown = Math.max(Number(rule.cooldown) || 300, 300);
+      // Most samples cannot produce a reminder; avoid a database write per rule
+      // per sample while retaining the atomic eligibility query below.
+      if (!['SENT', 'FAILED'].includes(alert.initialDeliveryStatus) ||
+        (alert.lastQueuedAt && +now - +alert.lastQueuedAt < cooldown * 1000)) return;
       const kind = 'reminder';
       const location = alert.location || await this.location(device);
       await alerts.updateOne({
@@ -223,7 +280,13 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
         nextRetry: now, attempts: 0, lastQueuedAt: now, cooldown, location,
         deliveryDeadline: new Date(+now + DELIVERY_LIFETIME_MS),
       } });
-    }
+      })();
+      await this.db.collection('rules').updateOne({ _id: rule._id, updatedAt: rule.updatedAt }, {
+        $set: { start, lastSample: received, lastMeasured: measured, lastValidSampleAt: measured, measurementState },
+      });
+    }));
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
   }
   async active(user: User) {
     return this.db.collection('alerts').find({

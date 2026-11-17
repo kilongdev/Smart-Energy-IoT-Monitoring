@@ -74,6 +74,7 @@ export class Database implements OnModuleInit, OnModuleDestroy {
         {},
       ],
       ['alerts', { ma_quy_tac: 1, trang_thai: 1 }, {}],
+      ['alerts', { isOpen: 1, measurementState: 1, lastSeen: 1 }, {}],
       [
         'commands',
         { buildingId: 1, thoi_gian_thuc_hien: -1 },

@@ -53,7 +53,7 @@ export class Analytics implements OnApplicationBootstrap, OnModuleDestroy {
       hour + HOUR,
     ];
 
-    for (const affectedHour of affectedHours) {
+    await Promise.all(affectedHours.map(async affectedHour => {
       await this.db.collection('dirty_hours').updateOne(
         {
           _id: `${deviceId}:${affectedHour}`,
@@ -69,7 +69,7 @@ export class Analytics implements OnApplicationBootstrap, OnModuleDestroy {
         },
         { upsert: true },
       );
-    }
+    }));
   }
 
   // Tính lại điện năng cho các khoảng giờ đã được đánh dấu.
