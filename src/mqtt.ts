@@ -49,10 +49,14 @@ export class Mqtt implements OnApplicationBootstrap, OnModuleDestroy {
     this.client = mqtt.connect(
       process.env.MQTT_URL,
       {
-        clientId: 'smart-energy-backend',
+        // ClientId cố định khiến 2 backend (local + Render) đá nhau khỏi
+        // EMQX (clean:false giữ session) -> connect/close liên tục và
+        // Control.send báo "MQTT chưa kết nối" dù broker vẫn sống.
+        // Dùng id duy nhất mỗi tiến trình để không tranh session.
+        clientId: `smart-energy-backend-${process.pid}-${Math.random().toString(36).slice(2, 8)}`,
         username: process.env.MQTT_USERNAME,
         password: process.env.MQTT_PASSWORD,
-        clean: false,
+        clean: true,
         reconnectPeriod: 2000,
         connectTimeout: 5000,
         queueQoSZero: false,
