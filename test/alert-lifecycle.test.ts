@@ -5,6 +5,71 @@ import { Alerts } from '../src/alerts';
 import { MemoryStore } from './memory-store';
 
 afterEach(() => mock.restoreAll());
+test('Detection sample is immutable while latest evaluated sample changes', async () => {
+  const f = await setup();
+  await f.measure(0, 250); await f.measure(5, 260);
+  assert.equal((await f.alert()).snapshot.detectedSample.dien_ap_v, 250);
+  assert.equal((await f.alert()).snapshot.sample.dien_ap_v, 260);
+});
+
+test('Missing metric resets recovery but does not let older telemetry restart it', async () => {
+  const f = await setup();
+  await f.measure(0, 250); await f.measure(5, 220);
+  await f.service.evaluate(f.device, { ...f.sample(10), dien_ap_v: undefined });
+  await f.service.evaluate(f.device, { ...f.sample(6, 220), receivedAt: f.sample(11).receivedAt });
+  assert.equal((await f.alert()).measurementState, 'ACTIVE');
+  assert.equal((await f.alert()).recoverySince, null);
+});
+
+test('A failed alert write can retry the same sample without losing recovery', async () => {
+  const f = await setup();
+  await f.measure(0, 250);
+  const collection = f.db.collection.bind(f.db);
+  let fail = true;
+  mock.method(f.db, 'collection', (name: string) => {
+    const result = collection(name);
+    if (name === 'alerts') {
+      const update = result.updateOne.bind(result);
+      result.updateOne = async (query: any, change: any, options: any) => {
+        if (fail && change.$set?.['snapshot.sample']) { fail = false; throw new Error('temporary write failure'); }
+        return update(query, change, options);
+      };
+    }
+    return result;
+  });
+  await assert.rejects(f.measure(5, 220), /temporary write failure/);
+  await f.measure(5, 220);
+  assert.equal((await f.alert()).measurementState, 'RECOVERING');
+});
+
+test('B101: 3145.6 W received 114 seconds late cannot recover a 4000 W incident', async () => {
+  const f = await setup({ chi_so_can_do:'cong_suat_w', gia_tri_nguong:4000,
+    gia_tri_phuc_hoi:3500, thoi_gian_phuc_hoi:5 });
+  await f.service.evaluate(f.device, { ...f.sample(0), cong_suat_w:4942.4 });
+  await f.service.evaluate(f.device, { ...f.sample(2), receivedAt:f.sample(116).receivedAt, cong_suat_w:3145.6 });
+  assert.equal((await f.alert()).measurementState, 'ACTIVE');
+  assert.equal((await f.alert()).snapshot.sample.cong_suat_w, 4942.4);
+  await f.service.evaluate(f.device, { ...f.sample(120), cong_suat_w:3145.6 });
+  assert.equal((await f.alert()).measurementState, 'RECOVERING');
+  await f.service.evaluate(f.device, { ...f.sample(125), cong_suat_w:3145.6 });
+  assert.equal((await f.alert()).measurementState, 'RECOVERED');
+});
+
+test('Simultaneous devices keep independent pending, active and recovery states', async () => {
+  const f = await setup({ thoi_gian_duy_tri:5, thoi_gian_phuc_hoi:5 });
+  const other = { ...f.device, _id:'other', ma_phong:'other-room' };
+  await f.db.collection('rules').insertOne({ ...f.rule, _id:'other-rule', ma_thiet_bi:'other' });
+  await Promise.all([f.measure(0,250),f.service.evaluate(other,f.sample(0,220))]);
+  assert.equal(await f.db.collection('alerts').countDocuments(),0);
+  await Promise.all([f.measure(5,250),f.service.evaluate(other,f.sample(5,220))]);
+  assert.equal(await f.db.collection('alerts').countDocuments(),1);
+  await Promise.all([f.measure(10,220),f.service.evaluate(other,f.sample(10,250))]);
+  await Promise.all([f.measure(15,220),f.service.evaluate(other,f.sample(15,250))]);
+  assert.equal((await f.alert()).measurementState,'RECOVERED');
+  const active = await f.db.collection('alerts').findOne({ma_thiet_bi:'other'});
+  assert.equal(active.measurementState,'ACTIVE');
+  assert.equal(active.ma_phong,'other-room');
+});
 async function setup(extra: any = {}) {
   const db = new MemoryStore();
   const device = { _id: 'd', buildingId: 'b', ma_phong: 'p', ten_thiet_bi: 'ESP32', chu_ky_gui: 5 };
@@ -49,6 +114,8 @@ test('A spike during recovery resets recovery without creating another incident'
   const f = await setup();
   await f.measure(0, 250);
   await f.measure(5); await f.measure(15); await f.measure(25, 250);
+  assert.equal(f.events.filter(event => event[1] === 'alert').length, 3,
+    'detection, start recovery and return to ACTIVE must each notify clients');
   assert.equal((await f.alert()).recoverySince, null);
   assert.equal((await f.alert()).tinh_trang, 'Đang diễn ra');
   for (const t of [30, 40, 50]) await f.measure(t);
@@ -57,6 +124,40 @@ test('A spike during recovery resets recovery without creating another incident'
   assert.equal((await f.alert()).tinh_trang, 'Đã kết thúc');
   assert.equal(await f.db.collection('alerts').countDocuments(), 1);
 });
+
+for (const [metric, operator, threshold, recovery, fault, boundary, normal] of [
+  ['cong_suat_w', '>', 4000, 3800, 4500, 3900, 3500],
+  ['dien_ap_v', '<', 198, 205, 180, 200, 220],
+  ['dien_ap_v', '>', 242, 235, 250, 240, 220],
+  ['nhiet_do_c', '>=', 60, 55, 65, 58, 40],
+  ['dong_ro_ma', '>=', 30, 20, 40, 25, 0],
+  ['dong_dien_a', '>', 20, 18, 25, 19, 10],
+] as const) {
+  test(`${metric} ${operator}: sustain, hysteresis, interrupted recovery and completion`, async () => {
+    const f = await setup({ chi_so_can_do: metric, toan_tu: operator,
+      gia_tri_nguong: threshold, gia_tri_phuc_hoi: recovery,
+      thoi_gian_duy_tri: 5, thoi_gian_phuc_hoi: 10 });
+    const send = (seconds: number, value: number) => f.service.evaluate(f.device,
+      { ...f.sample(seconds), [metric]: value });
+    await send(0, fault);
+    assert.equal(await f.alert(), null);
+    await send(5, fault);
+    const id = (await f.alert())._id;
+    await send(10, boundary);
+    assert.equal((await f.alert()).measurementState, 'ACTIVE');
+    await send(15, normal);
+    assert.equal((await f.alert()).measurementState, 'RECOVERING');
+    await send(20, fault);
+    assert.equal((await f.alert()).recoverySince, null);
+    assert.equal((await f.alert())._id, id);
+    await send(25, normal); await send(30, normal);
+    assert.equal((await f.alert()).isOpen, true);
+    await send(35, normal);
+    assert.equal((await f.alert()).measurementState, 'RECOVERED');
+    assert.equal((await f.alert()).isOpen, false);
+    assert.equal((await f.alert()).recoveryNotification.notificationKind, 'recovered');
+  });
+}
 
 test('Missing samples, delayed historical readings and duplicate timestamps cannot prove recovery', async () => {
   const f = await setup();
@@ -84,6 +185,33 @@ test('Leaving a time window does not resolve a violation; actual recovery is sti
   assert.equal((await f.alert()).outsideWindow, true);
   for (const t of [45, 55, 65, 75]) await f.measure(t);
   assert.equal((await f.alert()).tinh_trang, 'Đã kết thúc');
+});
+
+test('A newer but delayed sample interrupts recovery instead of leaving a frozen RECOVERING badge', async () => {
+  const f = await setup({ thoi_gian_phuc_hoi: 5 });
+  await f.measure(0, 250); await f.measure(2, 220);
+  assert.equal((await f.alert()).measurementState, 'RECOVERING');
+  await f.service.evaluate(f.device, { ...f.sample(4, 260), receivedAt: f.sample(106).receivedAt });
+  assert.equal((await f.alert()).measurementState, 'ACTIVE');
+  assert.equal((await f.alert()).recoverySince, null);
+  assert.ok((await f.alert()).recoveryInterruptedReason);
+  assert.equal(+(await f.alert()).lastSeen, +f.sample(2).receivedAt, 'a delayed sample is not a valid evaluation');
+  await f.measure(110, 250);
+  assert.equal((await f.alert()).recoveryInterruptedReason, null);
+  await f.measure(115, 220); await f.measure(120, 220);
+  assert.equal((await f.alert()).measurementState, 'RECOVERED');
+});
+
+test('Recovery expires without new samples and cannot complete from elapsed wall time alone', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const f = await setup();
+  await f.measure(0, 250); await f.measure(5);
+  t.mock.timers.tick(36_000);
+  await f.service.expireRecoveries();
+  assert.equal((await f.alert()).measurementState, 'ACTIVE');
+  assert.equal((await f.alert()).isOpen, true);
+  assert.equal((await f.alert()).recoverySince, null);
+  assert.equal((await f.alert()).recoveryNotification, undefined);
 });
 
 test('Voltage is normal only when both high and low bounds are satisfied', async () => {
