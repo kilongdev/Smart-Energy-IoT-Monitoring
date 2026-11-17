@@ -36,7 +36,7 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
         measurementState: 'ACTIVE', tinh_trang: 'Đang diễn ra', recoverySince: null,
         recoveryStartedAt: null, recoveryInterruptedReason: reason,
       } });
-      if (result.modifiedCount) this.events.send(row.buildingId, 'alert', { id: row._id }, true);
+      if (result.modifiedCount) this.events.send(row.buildingId, 'alert', { id: row._id });
     }
   }
   async expireRecoveries() {
@@ -162,7 +162,7 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
         if (alert) await alerts.updateOne({ _id: alert._id }, { $set: {
           recoverySince: null, recoveryStartedAt: null, measurementState: 'ACTIVE', tinh_trang: 'Đang diễn ra', trang_thai: 'Đang theo dõi',
         } });
-        if (alert?.measurementState === 'RECOVERING') this.events.send(device.buildingId, 'alert', { id: alert._id }, true);
+        if (alert?.measurementState === 'RECOVERING') this.events.send(device.buildingId, 'alert', { id: alert._id });
         return;
       }
       const continuous = Boolean(rule.lastSample && rule.lastMeasured &&
@@ -208,7 +208,7 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
           );
           if (closed.modifiedCount) this.events.send(device.buildingId, 'alert', {
             id: alert._id, message: device.ten_thiet_bi + ': Thông số đã phục hồi theo quy tắc giám sát',
-          }, true);
+          });
           measurementState = 'NORMAL';
           return;
         }
@@ -221,7 +221,7 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
         }, ...(!normal ? { $inc: { occurrences: 1 } } : {}) });
         // Notify both directions, including a renewed violation during recovery.
         if (alert.measurementState !== (normal ? 'RECOVERING' : 'ACTIVE')) {
-          this.events.send(device.buildingId, 'alert', { id: alert._id }, true);
+          this.events.send(device.buildingId, 'alert', { id: alert._id });
         }
         if (normal || !withinWindow) {
           return;
@@ -254,7 +254,7 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
         try { await alerts.insertOne(alert); }
         catch (error: any) { if (error.code === 11000) return; throw error; }
         measurementState = 'ACTIVE';
-        this.events.send(device.buildingId, 'alert', { id: alert._id, message: alert.noi_dung_loi }, true);
+        this.events.send(device.buildingId, 'alert', { id: alert._id, message: alert.noi_dung_loi });
       }
       const now = new Date();
       const cooldown = Math.max(Number(rule.cooldown) || 300, 300);
@@ -408,7 +408,7 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
             $inc: { [prefix + 'attempts']: 1 },
             $push: { deliveryLog: { at: now, state, error, messageId, kind: delivery.notificationKind || 'detected' } },
           } as any);
-          this.events.send(alert.buildingId, 'alert', { id: alert._id }, true);
+          this.events.send(alert.buildingId, 'alert', { id: alert._id });
           return;
         }
       }

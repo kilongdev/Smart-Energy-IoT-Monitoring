@@ -413,8 +413,13 @@ function App() {
     return () => window.removeEventListener('energy-logout', logout);
   }, []);
   const loadingRequest = useRef(false);
+  const refreshPending = useRef(false);
   const load = useCallback(async () => {
-    if (!user || loadingRequest.current) return;
+    if (!user) return;
+    if (loadingRequest.current) {
+      refreshPending.current = true;
+      return;
+    }
     loadingRequest.current = true;
     try {
       const names = [
@@ -456,6 +461,10 @@ function App() {
       setDeviceLoadError(e.message);
     } finally {
       loadingRequest.current = false;
+      if (refreshPending.current) {
+        refreshPending.current = false;
+        queueMicrotask(() => load());
+      }
     }
   }, [user, admin, manager]);
   useEffect(() => {
@@ -466,7 +475,10 @@ function App() {
       transports: ['websocket'],
       auth: { token: getToken() },
     });
-    socket.on('connect', () => setConnected(true));
+    socket.on('connect', () => {
+      setConnected(true);
+      update();
+    });
     socket.on('disconnect', () => setConnected(false));
     const update = () => {
       if (refreshTimer.current) return;
