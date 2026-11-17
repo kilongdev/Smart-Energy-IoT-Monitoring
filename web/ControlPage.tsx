@@ -26,13 +26,6 @@ const DeviceCard = memo(function DeviceCard({ device:d, room, command, saving, r
   },[measured,power]);
   const awaiting = !!d.pendingCommand || pending(command);
   const disabled=!d.online || !d.cho_phep_dieu_khien || saving || awaiting || sending;
-  const state= sending || awaiting ? 'pending' : command?.trang_thai === 'Thành công' ? 'success' : command?.trang_thai === 'Thất bại' ? 'failed' : command?.trang_thai === 'Chưa xác định' ? 'unknown' : '';
-  const statusText:Record<string,string>={pending:'Đang chờ thiết bị xác nhận',success:'Thiết bị đã xác nhận',failed:'Điều khiển thất bại',unknown:'Chưa nhận được xác nhận từ thiết bị'};
-  // Lệnh trong nhật ký là kết quả của lần bấm trước, không phải trạng thái hiện tại.
-  // Nếu thiết bị đã online trở lại mà lệnh cũ vẫn báo offline thì ghi rõ thời điểm
-  // để không gây nhầm với badge Online phía trên.
-  const commandAt = command?.thoi_gian_thuc_hien || command?.completedAt;
-  const staleOffline = !!d.online && (state === 'failed' || state === 'unknown') && /offline/i.test(command?.loi || '');
   const relay=typeof d.trang_thai_relay==='boolean' ? d.trang_thai_relay ? 'Đang bật' : 'Đang tắt' : 'Chưa xác định';
   async function send(action:string) {
     if(disabled || guard.current)return;
@@ -46,7 +39,7 @@ const DeviceCard = memo(function DeviceCard({ device:d, room, command, saving, r
     <div className="control-spark" aria-label="Xu hướng công suất từ các mẫu nhận khi mở trang">{points.length>1?<Chart height={56} option={{animationDurationUpdate:250,grid:{left:2,right:2,top:5,bottom:4},xAxis:{type:'time',show:false},yAxis:{type:'value',show:false,scale:true},tooltip:{trigger:'axis'},series:[{type:'line',showSymbol:false,data:points,lineStyle:{color:d.online?'#327d60':'#94a099',width:2},areaStyle:{color:'#dcece1',opacity:.5}}]}} />:<span>Đang thu thập dữ liệu xu hướng</span>}</div>
     <div className="relay-status"><span>{d.online?'Trạng thái relay':'Relay ghi nhận lần cuối'}</span><b>{relay}</b></div>
     <div className="relay-segment" aria-label={'Điều khiển '+d.ten_thiet_bi}>{['Bật','Tắt'].map(action=><button key={action} disabled={disabled} aria-pressed={d.online && d.trang_thai_relay === (action==='Bật')} className={d.online && d.trang_thai_relay === (action==='Bật')?'confirmed':''} onClick={()=>send(action)}><span className="inline-ui-icon" aria-hidden="true"><Icon name="control" /></span> {action}</button>)}</div>
-    <div className={'command-feedback '+state} role="status">{state && <><span className={state==='pending'?'command-spinner':''} aria-hidden="true">{state==='success'?'✓':state==='failed'?'!':state==='unknown'?<span className="inline-ui-icon"><Icon name="clock" /></span>:''}</span><span>{command?.hanh_dong ? command.hanh_dong+' · ' : ''}{staleOffline ? `Lệnh lúc ${date(commandAt)} báo offline (thiết bị đã Online trở lại)` : statusText[state]}{command?.loi && !staleOffline && <small>{command.loi}</small>}{staleOffline && <small>Bấm Bật/Tắt để gửi lệnh mới.</small>}</span></>}{!state && <span>{!d.online?'Thiết bị offline — không thể gửi lệnh':!d.cho_phep_dieu_khien?'Gateway không hỗ trợ điều khiển':'Sẵn sàng nhận lệnh'}</span>}</div>
+    {awaiting && <div className="command-feedback pending" role="status"><span className="command-spinner" aria-hidden="true" /><span>Đang chờ thiết bị xác nhận</span></div>}
   </article>;
 });
 export function ControlPage({ devices, rooms, commands, popup, connected, loading, error, retry, saving, run, Chart, Icon, Metric }: any) {
