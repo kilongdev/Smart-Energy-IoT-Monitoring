@@ -44,9 +44,8 @@ export class Telemetry
     clearInterval(this.timer);
   }
 
-  ingest(dto: any, topic?: string, markOnline = true) {
+  ingest(dto: any, topic?: string, markOnline = true, receivedAt = new Date()) {
     const id = dto.ma_thiet_bi;
-    const receivedAt = new Date();
 
     // Đánh dấu online ngay khi nhận bản tin hợp lệ (đã qua DTO validation
     // ở tầng MQTT), không đợi hàng đợi xử lý xong. Đánh giá cảnh báo có

@@ -1,5 +1,6 @@
 import { ControlPage } from './ControlPage';
 import { mergeAlertRecords, isAlertOpen } from './alert-records';
+import { createAlertRefresh } from './alert-refresh';
 import { updateLiveReading, preserveNewerReadings } from './live-readings';
 import { HeatPlan } from './HeatPlan';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
@@ -7,6 +8,10 @@ import { createRoot } from 'react-dom/client';
 import * as echarts from 'echarts';
 import { io } from 'socket.io-client';
 type Row = Record<string, any>;
+const traceAlerts = (stage: string, fields: Row = {}) => {
+  if (sessionStorage.getItem('energy-realtime-trace') === 'true')
+    console.debug('[energy-realtime]', { stage, at: new Date().toISOString(), ...fields });
+};
 const fmt = (n: number, d = 0) =>
   new Intl.NumberFormat('vi-VN', { maximumFractionDigits: d }).format(n || 0);
 const date = (v: any) =>
@@ -412,9 +417,34 @@ function App() {
     else setAuthLoading(false);
     return () => window.removeEventListener('energy-logout', logout);
   }, []);
+  const alertRefresh = useRef<ReturnType<typeof createAlertRefresh> | null>(null);
+  useEffect(() => {
+    if (!user) return;
+    const refresh = createAlertRefresh(async () => {
+      traceAlerts('alerts.fetch.start');
+      const active = await api('alerts/active');
+      if (!manager) return { active, history: null };
+      const history = await api('alerts/history');
+      const linkedId = new URLSearchParams(location.search).get('alert');
+      const linked = linkedId && !history.some((item: Row) => item._id === linkedId)
+        ? await api('alerts/history?id=' + encodeURIComponent(linkedId)) : [];
+      return { active, history: [...history, ...linked] };
+    }, result => {
+      traceAlerts('alerts.state.commit', { openIds: result.active.map((row: Row) => row._id) });
+      setActiveAlerts(result.active);
+      if (result.history) setAlerts(result.history);
+      setAlertsReady(true);
+      setAlertsLoadError('');
+    }, error => setAlertsLoadError(error instanceof Error ? error.message : 'Không tải được cảnh báo'));
+    alertRefresh.current = refresh;
+    return () => { refresh.dispose(); alertRefresh.current = null; };
+  }, [user, manager]);
+  useEffect(() => { traceAlerts('alerts.react.commit', { count: alerts.length }); }, [alerts, activeAlerts]);
   const loadingRequest = useRef(false);
   const load = useCallback(async () => {
-    if (!user || loadingRequest.current) return;
+    if (!user) return;
+    void alertRefresh.current?.request(false);
+    if (loadingRequest.current) return;
     loadingRequest.current = true;
     try {
       const names = [
@@ -424,35 +454,25 @@ function App() {
         'devices',
         ...(admin ? ['users'] : []),
       ];
-      const [dash, active, ...values] = await Promise.all([
+      const [dash, ...values] = await Promise.all([
         api('dashboard'),
-        api('alerts/active'),
         ...names.map((x) => api(x)),
       ]);
       setDeviceLoadError('');
       setData(current => preserveNewerReadings(dash, current));
-      setActiveAlerts(active);
       setLists(Object.fromEntries(names.map((n, i) => [n, values[i]])));
       if (manager) {
-        const [a, r, s, l] = await Promise.all([
-          api('alerts/history'),
+        const [r, s, l] = await Promise.all([
           api('alerts/rules'),
           api('control/schedules'),
           api('control/logs'),
         ]);
-        const linkedId = new URLSearchParams(location.search).get('alert');
-        const linked = linkedId && !a.some((item: Row) => item._id === linkedId)
-          ? await api('alerts/history?id=' + encodeURIComponent(linkedId)) : [];
-        setAlerts([...a, ...linked]);
         setRules(r);
         setSchedules(s);
         setLogs(l);
-        setAlertsReady(true);
-        setAlertsLoadError('');
       }
     } catch (e: any) {
       setError(e.message);
-      setAlertsLoadError(e.message);
       setDeviceLoadError(e.message);
     } finally {
       loadingRequest.current = false;
@@ -466,7 +486,7 @@ function App() {
       transports: ['websocket'],
       auth: { token: getToken() },
     });
-    socket.on('connect', () => setConnected(true));
+    socket.on('connect', () => { setConnected(true); void alertRefresh.current?.request(); });
     socket.on('disconnect', () => setConnected(false));
     const update = () => {
       if (refreshTimer.current) return;
@@ -483,9 +503,10 @@ function App() {
       update();
     });
     socket.on('alert', (e: any) => {
+      traceAlerts('socket.received', { alertId: e.id });
       setNoticeTone('success');
       setNotice(e.message || 'Trạng thái cảnh báo đã cập nhật');
-      update();
+      void alertRefresh.current?.request();
     });
     return () => {
       clearInterval(timer);

@@ -11,6 +11,7 @@ import {
 import { Server, Socket } from 'socket.io';
 
 import { Security } from './security';
+import { realtimeTrace } from './realtime-trace';
 
 @Injectable()
 export class Events extends EventEmitter {
@@ -46,6 +47,7 @@ export class RealtimeGateway
     private readonly events: Events,
   ) {
     this.events.on('push', (event) => {
+      if (event.type === 'alert') realtimeTrace('socket.emit', { alertId: event.data.id });
       const rooms = event.management
         ? [`manage:${event.buildingId}`, 'manage:*']
         : [`building:${event.buildingId}`, 'building:*'];

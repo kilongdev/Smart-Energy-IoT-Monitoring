@@ -1,0 +1,395 @@
+diff --git a/src/alerts.ts b/src/alerts.ts
+index 67906c1..8cee5d2 100644
+--- a/src/alerts.ts
++++ b/src/alerts.ts
+@@ -7,6 +7,7 @@ import { Events } from './events';
+ import { Security } from './security';
+ import { sendTelegram, telegramAlertText, telegramConfig, TelegramError } from './telegram';
+ import { DELIVERY_LIFETIME_MS, inRecoveryRange, MAX_CLOCK_AHEAD_MS, MAX_SAMPLE_DELAY_MS, validRecoveryThreshold } from './alert-policy';
++import { realtimeTrace } from './realtime-trace';
+ 
+ @Injectable()
+ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
+@@ -86,6 +87,9 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
+       floor ? 'Tầng ' + floor.so_tang : null, room?.ten_phong || device.ma_phong].filter(Boolean).join(' / ');
+   }
+   async evaluate(device: any, sample: any) {
++    realtimeTrace('alert.evaluate', { deviceId: device._id, sampleId: sample._id,
++      measuredAt: sample.thoi_gian_do, receivedAt: sample.receivedAt,
++      queueDelayMs: Date.now() - +new Date(sample.receivedAt || sample.thoi_gian_do) });
+     const received = +new Date(sample.receivedAt || sample.thoi_gian_do);
+     const measured = +new Date(sample.thoi_gian_do);
+     if (!Number.isFinite(measured) || !Number.isFinite(received) ||
+@@ -206,6 +210,8 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
+               lastSeen: received, 'snapshot.sample': sample, monitoringPaused: false, recoveryInterruptedReason: null,
+             } },
+           );
++          realtimeTrace('alert.persisted', { alertId: alert._id, state: 'RECOVERED', changed: closed.modifiedCount,
++            receivedAt: received, measuredAt: measured });
+           if (closed.modifiedCount) this.events.send(device.buildingId, 'alert', {
+             id: alert._id, message: device.ten_thiet_bi + ': Thông số đã phục hồi theo quy tắc giám sát',
+           }, true);
+@@ -219,6 +225,8 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
+           measuredAt: measured, receivedAt: received, lastValidSampleAt: measured,
+           monitoringPaused: false, outsideWindow: !withinWindow, recoveryInterruptedReason: null,
+         }, ...(!normal ? { $inc: { occurrences: 1 } } : {}) });
++        realtimeTrace('alert.persisted', { alertId: alert._id, state: normal ? 'RECOVERING' : 'ACTIVE',
++          receivedAt: received, measuredAt: measured });
+         // Notify both directions, including a renewed violation during recovery.
+         if (alert.measurementState !== (normal ? 'RECOVERING' : 'ACTIVE')) {
+           this.events.send(device.buildingId, 'alert', { id: alert._id }, true);
+@@ -253,6 +261,7 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
+         });
+         try { await alerts.insertOne(alert); }
+         catch (error: any) { if (error.code === 11000) return; throw error; }
++        realtimeTrace('alert.persisted', { alertId: alert._id, state: 'ACTIVE', receivedAt: received, measuredAt: measured });
+         measurementState = 'ACTIVE';
+         this.events.send(device.buildingId, 'alert', { id: alert._id, message: alert.noi_dung_loi }, true);
+       }
+diff --git a/src/events.ts b/src/events.ts
+index 89c372d..f2e6788 100644
+--- a/src/events.ts
++++ b/src/events.ts
+@@ -11,6 +11,7 @@ import {
+ import { Server, Socket } from 'socket.io';
+ 
+ import { Security } from './security';
++import { realtimeTrace } from './realtime-trace';
+ 
+ @Injectable()
+ export class Events extends EventEmitter {
+@@ -46,6 +47,7 @@ export class RealtimeGateway
+     private readonly events: Events,
+   ) {
+     this.events.on('push', (event) => {
++      if (event.type === 'alert') realtimeTrace('socket.emit', { alertId: event.data.id });
+       const rooms = event.management
+         ? [`manage:${event.buildingId}`, 'manage:*']
+         : [`building:${event.buildingId}`, 'building:*'];
+@@ -110,4 +112,4 @@ export class RealtimeGateway
+       clearInterval(timer);
+     }
+   }
+-}
+\ No newline at end of file
++}
+diff --git a/src/mqtt.ts b/src/mqtt.ts
+index 9d44b3d..e046ee2 100644
+--- a/src/mqtt.ts
++++ b/src/mqtt.ts
+@@ -14,6 +14,7 @@ import { Database } from './database';
+ import { AckDto, TelemetryDto } from './dto';
+ import { Events } from './events';
+ import { Telemetry } from './telemetry';
++import { realtimeTrace } from './realtime-trace';
+ 
+ @Injectable()
+ export class Mqtt implements OnApplicationBootstrap, OnModuleDestroy {
+@@ -84,6 +85,7 @@ export class Mqtt implements OnApplicationBootstrap, OnModuleDestroy {
+     // A DB error closes the connection without acknowledging so a
+     // persistent session can replay.
+     this.client.handleMessage = (packet, done) => {
++      const receivedAt = new Date();
+       const topic = packet.topic;
+ 
+       if (
+@@ -141,8 +143,10 @@ export class Mqtt implements OnApplicationBootstrap, OnModuleDestroy {
+           // vẫn nằm ở telemetry (processed:false) và được replay 5s/lần.
+           const copy = { ...json };
+           const telemetryTopic = topic;
++          realtimeTrace('mqtt.received', { deviceId: copy.ma_thiet_bi, measuredAt: copy.thoi_gian_do,
++            receivedAt, transportDelayMs: +receivedAt - Date.parse(copy.thoi_gian_do) });
+           done();
+-          await this.telemetry.ingest(copy, telemetryTopic).catch(async (ingestError) => {
++          await this.telemetry.ingest(copy, telemetryTopic, true, receivedAt).catch(async (ingestError) => {
+             if (ingestError instanceof HttpException) {
+               await this.db
+                 .audit('INVALID_MQTT', {
+diff --git a/src/telemetry.ts b/src/telemetry.ts
+index 2111339..1270fba 100644
+--- a/src/telemetry.ts
++++ b/src/telemetry.ts
+@@ -44,9 +44,8 @@ export class Telemetry
+     clearInterval(this.timer);
+   }
+ 
+-  ingest(dto: any, topic?: string, markOnline = true) {
++  ingest(dto: any, topic?: string, markOnline = true, receivedAt = new Date()) {
+     const id = dto.ma_thiet_bi;
+-    const receivedAt = new Date();
+ 
+     // Đánh dấu online ngay khi nhận bản tin hợp lệ (đã qua DTO validation
+     // ở tầng MQTT), không đợi hàng đợi xử lý xong. Đánh giá cảnh báo có
+diff --git a/test/domain.test.ts b/test/domain.test.ts
+index 91c2de0..f252174 100644
+--- a/test/domain.test.ts
++++ b/test/domain.test.ts
+@@ -3,6 +3,44 @@ import { Catalog } from '../src/catalog';
+ import { MemoryStore as MemoryDatabase } from './memory-store';
+ import { mergeAlertRecords, isAlertOpen } from '../web/alert-records';
+ import { updateLiveReading, preserveNewerReadings } from '../web/live-readings';
++import { createAlertRefresh } from '../web/alert-refresh';
++
++test('Alert event during HTTP read is not lost and stale response cannot overwrite recovery', async () => {
++ const reads: Array<(value:string)=>void> = [];
++ const commits: string[] = [];
++ const refresh = createAlertRefresh(() => new Promise<string>(resolve=>reads.push(resolve)),
++   value=>commits.push(value), error=>{throw error;});
++ const first = refresh.request();
++ refresh.request(); // RECOVERED event while ACTIVE request is pending
++ reads[0]('ACTIVE');
++ await new Promise(resolve=>setImmediate(resolve));
++ assert.deepEqual(commits,[]);
++ assert.equal(reads.length,2);
++ reads[1]('RECOVERED');
++ await first;
++ assert.deepEqual(commits,['RECOVERED']);
++ const reconnect = refresh.request();
++ reads[2]('NEW ACTIVE'); await reconnect;
++ assert.deepEqual(commits,['RECOVERED','NEW ACTIVE']);
++ const oldSession = refresh.request(); refresh.dispose();
++ reads[3]('OLD USER DATA'); await oldSession;
++ assert.equal(commits.length,2);
++});
++
++test('Background loads cannot starve alert refresh and one failed request does not disable later events', async () => {
++ let finish!: (value:string)=>void;
++ let failure = false;
++ const commits:string[] = [], errors:unknown[]=[];
++ const refresh = createAlertRefresh(() => failure ? Promise.reject(new Error('offline'))
++   : new Promise<string>(resolve=>{finish=resolve;}), value=>commits.push(value),error=>errors.push(error));
++ const first = refresh.request();
++ for(let i=0;i<20;i++) refresh.request(false);
++ finish('ACTIVE'); await first;
++ assert.deepEqual(commits,['ACTIVE']);
++ failure=true; await refresh.request(); assert.equal(errors.length,1);
++ failure=false; const next=refresh.request(); finish('RECOVERED'); await next;
++ assert.deepEqual(commits,['ACTIVE','RECOVERED']);
++});
+ 
+ test('Live telemetry updates room power and stale HTTP cannot roll it back', () => {
+  const now = new Date().toISOString();
+diff --git a/web/app.tsx b/web/app.tsx
+index 41909b2..b93cb36 100644
+--- a/web/app.tsx
++++ b/web/app.tsx
+@@ -1,5 +1,6 @@
+ import { ControlPage } from './ControlPage';
+ import { mergeAlertRecords, isAlertOpen } from './alert-records';
++import { createAlertRefresh } from './alert-refresh';
+ import { updateLiveReading, preserveNewerReadings } from './live-readings';
+ import { HeatPlan } from './HeatPlan';
+ import React, { useState, useEffect, useRef, useCallback } from 'react';
+@@ -7,6 +8,10 @@ import { createRoot } from 'react-dom/client';
+ import * as echarts from 'echarts';
+ import { io } from 'socket.io-client';
+ type Row = Record<string, any>;
++const traceAlerts = (stage: string, fields: Row = {}) => {
++  if (sessionStorage.getItem('energy-realtime-trace') === 'true')
++    console.debug('[energy-realtime]', { stage, at: new Date().toISOString(), ...fields });
++};
+ const fmt = (n: number, d = 0) =>
+   new Intl.NumberFormat('vi-VN', { maximumFractionDigits: d }).format(n || 0);
+ const date = (v: any) =>
+@@ -412,9 +417,34 @@ function App() {
+     else setAuthLoading(false);
+     return () => window.removeEventListener('energy-logout', logout);
+   }, []);
++  const alertRefresh = useRef<ReturnType<typeof createAlertRefresh> | null>(null);
++  useEffect(() => {
++    if (!user) return;
++    const refresh = createAlertRefresh(async () => {
++      traceAlerts('alerts.fetch.start');
++      const active = await api('alerts/active');
++      if (!manager) return { active, history: null };
++      const history = await api('alerts/history');
++      const linkedId = new URLSearchParams(location.search).get('alert');
++      const linked = linkedId && !history.some((item: Row) => item._id === linkedId)
++        ? await api('alerts/history?id=' + encodeURIComponent(linkedId)) : [];
++      return { active, history: [...history, ...linked] };
++    }, result => {
++      traceAlerts('alerts.state.commit', { openIds: result.active.map((row: Row) => row._id) });
++      setActiveAlerts(result.active);
++      if (result.history) setAlerts(result.history);
++      setAlertsReady(true);
++      setAlertsLoadError('');
++    }, error => setAlertsLoadError(error instanceof Error ? error.message : 'Không tải được cảnh báo'));
++    alertRefresh.current = refresh;
++    return () => { refresh.dispose(); alertRefresh.current = null; };
++  }, [user, manager]);
++  useEffect(() => { traceAlerts('alerts.react.commit', { count: alerts.length }); }, [alerts, activeAlerts]);
+   const loadingRequest = useRef(false);
+   const load = useCallback(async () => {
+-    if (!user || loadingRequest.current) return;
++    if (!user) return;
++    void alertRefresh.current?.request(false);
++    if (loadingRequest.current) return;
+     loadingRequest.current = true;
+     try {
+       const names = [
+@@ -424,35 +454,25 @@ function App() {
+         'devices',
+         ...(admin ? ['users'] : []),
+       ];
+-      const [dash, active, ...values] = await Promise.all([
++      const [dash, ...values] = await Promise.all([
+         api('dashboard'),
+-        api('alerts/active'),
+         ...names.map((x) => api(x)),
+       ]);
+       setDeviceLoadError('');
+       setData(current => preserveNewerReadings(dash, current));
+-      setActiveAlerts(active);
+       setLists(Object.fromEntries(names.map((n, i) => [n, values[i]])));
+       if (manager) {
+-        const [a, r, s, l] = await Promise.all([
+-          api('alerts/history'),
++        const [r, s, l] = await Promise.all([
+           api('alerts/rules'),
+           api('control/schedules'),
+           api('control/logs'),
+         ]);
+-        const linkedId = new URLSearchParams(location.search).get('alert');
+-        const linked = linkedId && !a.some((item: Row) => item._id === linkedId)
+-          ? await api('alerts/history?id=' + encodeURIComponent(linkedId)) : [];
+-        setAlerts([...a, ...linked]);
+         setRules(r);
+         setSchedules(s);
+         setLogs(l);
+-        setAlertsReady(true);
+-        setAlertsLoadError('');
+       }
+     } catch (e: any) {
+       setError(e.message);
+-      setAlertsLoadError(e.message);
+       setDeviceLoadError(e.message);
+     } finally {
+       loadingRequest.current = false;
+@@ -466,7 +486,7 @@ function App() {
+       transports: ['websocket'],
+       auth: { token: getToken() },
+     });
+-    socket.on('connect', () => setConnected(true));
++    socket.on('connect', () => { setConnected(true); void alertRefresh.current?.request(); });
+     socket.on('disconnect', () => setConnected(false));
+     const update = () => {
+       if (refreshTimer.current) return;
+@@ -483,9 +503,10 @@ function App() {
+       update();
+     });
+     socket.on('alert', (e: any) => {
++      traceAlerts('socket.received', { alertId: e.id });
+       setNoticeTone('success');
+       setNotice(e.message || 'Trạng thái cảnh báo đã cập nhật');
+-      update();
++      void alertRefresh.current?.request();
+     });
+     return () => {
+       clearInterval(timer);
+diff --git a/wokwi/sketch.ino b/wokwi/sketch.ino
+index e27a31b..b32e2ee 100644
+--- a/wokwi/sketch.ino
++++ b/wokwi/sketch.ino
+@@ -6,6 +6,8 @@
+ #include <Wire.h>
+ #include <Adafruit_GFX.h>
+ #include <Adafruit_SSD1306.h>
++#include <esp_sntp.h>
++#include <sys/time.h>
+ 
+ const char* WIFI_SSID = "Wokwi-GUEST";
+ const char* WIFI_PASSWORD = "";
+@@ -88,12 +90,25 @@ unsigned long lastOled = 0;
+ unsigned long lastButton = 0;
+ unsigned long lastBreaker = 0;
+ 
++volatile bool clockSynchronized = false;
++volatile unsigned long lastClockSync = 0;
++
++void onClockSync(struct timeval* value) {
++  lastClockSync = millis();
++  clockSynchronized = true;
++  Serial.printf("NTP synchronized: %lld\n", (long long)value->tv_sec);
++}
++
+ String isoNow() {
+-  time_t now = time(nullptr);
++  struct timeval current;
++  gettimeofday(&current, nullptr);
++  time_t now = current.tv_sec;
+   struct tm utc;
+   gmtime_r(&now, &utc);
+   char value[32];
+-  strftime(value, sizeof(value), "%Y-%m-%dT%H:%M:%S.000Z", &utc);
++  char seconds[24];
++  strftime(seconds, sizeof(seconds), "%Y-%m-%dT%H:%M:%S", &utc);
++  snprintf(value, sizeof(value), "%s.%03ldZ", seconds, (long)(current.tv_usec / 1000));
+   return String(value);
+ }
+ 
+@@ -372,6 +387,12 @@ void sampleAndPublish() {
+     Serial.println("!! CANH BAO: RO DIEN");
+   }
+ 
++  // Keep local readings/alarms and energy integration running, but do not
++  // publish an unsynchronized clock. SNTP runs asynchronously; no reconnect.
++  if (!clockSynchronized || millis() - lastClockSync > 20000) {
++    Serial.println("Waiting for fresh NTP synchronization before telemetry publish");
++    return;
++  }
+   JsonDocument document;
+   document["ma_thiet_bi"] = DEVICE_ID;
+   document["ma_phong"] = ROOM_ID;
+@@ -442,6 +463,10 @@ Serial.println(WiFi.macAddress());
+   Serial.println();
+   Serial.println("WiFi da ket noi");
+ 
++  // Wokwi's simulated clock can advance slower than real wall time.
++  // Use SNTP's supported minimum interval (15 s), not repeated configTime().
++  sntp_set_sync_interval(15000);
++  sntp_set_time_sync_notification_cb(onClockSync);
+   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+   tls.setInsecure();
+   mqtt.setServer(MQTT_HOST, MQTT_PORT);
+diff --git a/src/realtime-trace.ts b/src/realtime-trace.ts
+new file mode 100644
+--- /dev/null
++++ b/src/realtime-trace.ts
+@@ -0,0 +1,6 @@
++// Opt-in timing diagnostics. Callers pass IDs/times/states only, never payloads
++// containing credentials. No database writes and no change to event contracts.
++export function realtimeTrace(stage: string, fields: Record<string, unknown>) {
++  if (process.env.REALTIME_TRACE !== 'true') return;
++  console.info(JSON.stringify({ trace: 'energy-realtime', stage, at: new Date().toISOString(), ...fields }));
++}
+diff --git a/web/alert-refresh.ts b/web/alert-refresh.ts
+new file mode 100644
+--- /dev/null
++++ b/web/alert-refresh.ts
+@@ -0,0 +1,26 @@
++// Serialize alert reads without dropping an invalidation received in flight.
++// If another event arrives, discard the outdated result and immediately reread.
++export function createAlertRefresh<T>(read: () => Promise<T>, commit: (value: T) => void,
++  onError: (error: unknown) => void) {
++  let pending: Promise<void> | undefined;
++  let dirty = false;
++  let disposed = false;
++  return {
++    request(invalidate = true): Promise<void> {
++      if (disposed) return Promise.resolve();
++      if (!pending || invalidate) dirty = true;
++      if (pending) return pending;
++      pending = (async () => {
++        do {
++          dirty = false;
++          try {
++            const value = await read();
++            if (!disposed && !dirty) commit(value);
++          } catch (error) { if (!disposed && !dirty) onError(error); }
++        } while (dirty && !disposed);
++      })().finally(() => { pending = undefined; });
++      return pending;
++    },
++    dispose() { disposed = true; },
++  };
++}

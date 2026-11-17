@@ -3,6 +3,44 @@ import { Catalog } from '../src/catalog';
 import { MemoryStore as MemoryDatabase } from './memory-store';
 import { mergeAlertRecords, isAlertOpen } from '../web/alert-records';
 import { updateLiveReading, preserveNewerReadings } from '../web/live-readings';
+import { createAlertRefresh } from '../web/alert-refresh';
+
+test('Alert event during HTTP read is not lost and stale response cannot overwrite recovery', async () => {
+ const reads: Array<(value:string)=>void> = [];
+ const commits: string[] = [];
+ const refresh = createAlertRefresh(() => new Promise<string>(resolve=>reads.push(resolve)),
+   value=>commits.push(value), error=>{throw error;});
+ const first = refresh.request();
+ refresh.request(); // RECOVERED event while ACTIVE request is pending
+ reads[0]('ACTIVE');
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.deepEqual(commits,[]);
+ assert.equal(reads.length,2);
+ reads[1]('RECOVERED');
+ await first;
+ assert.deepEqual(commits,['RECOVERED']);
+ const reconnect = refresh.request();
+ reads[2]('NEW ACTIVE'); await reconnect;
+ assert.deepEqual(commits,['RECOVERED','NEW ACTIVE']);
+ const oldSession = refresh.request(); refresh.dispose();
+ reads[3]('OLD USER DATA'); await oldSession;
+ assert.equal(commits.length,2);
+});
+
+test('Background loads cannot starve alert refresh and one failed request does not disable later events', async () => {
+ let finish!: (value:string)=>void;
+ let failure = false;
+ const commits:string[] = [], errors:unknown[]=[];
+ const refresh = createAlertRefresh(() => failure ? Promise.reject(new Error('offline'))
+   : new Promise<string>(resolve=>{finish=resolve;}), value=>commits.push(value),error=>errors.push(error));
+ const first = refresh.request();
+ for(let i=0;i<20;i++) refresh.request(false);
+ finish('ACTIVE'); await first;
+ assert.deepEqual(commits,['ACTIVE']);
+ failure=true; await refresh.request(); assert.equal(errors.length,1);
+ failure=false; const next=refresh.request(); finish('RECOVERED'); await next;
+ assert.deepEqual(commits,['ACTIVE','RECOVERED']);
+});
 
 test('Live telemetry updates room power and stale HTTP cannot roll it back', () => {
  const now = new Date().toISOString();
