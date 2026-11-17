@@ -459,12 +459,16 @@ export class VirtualDevices
           await this.client!.publishAsync(
             `${state.topic}/telemetry`,
             JSON.stringify(payload),
-            { qos: 1 },
+            // Telemetry fleet dùng QoS 0: Wokwi thật cũng publish QoS 0,
+            // giảm 1/2 tải PUBACK trên EMQX free-tier để nhường slot cho
+            // ACK lệnh Bật/Tắt (vẫn QoS 1) của Wokwi về trong 1-2s.
+            { qos: 0 },
           );
 
-          // Chỉ tính đã gửi khi publish thành công; thất bại giữ nguyên
-          // để tick sau retry ngay thay vì trễ thêm cả chu kỳ.
-          state.last = now;
+          // Giữ rải pha: last = now + jitter 0-500ms thay vì cùng 1 mốc,
+          // nếu không 15 gateway sẽ đồng bộ và dồn 15 insert Atlas cùng
+          // lúc mỗi chu kỳ, chặn event-loop và làm chậm đường Wokwi.
+          state.last = Date.now() + Math.floor(Math.random() * 500);
         }),
       );
 

@@ -481,15 +481,28 @@ function App() {
   useEffect(() => {
     if (!user) return;
     load();
-    const timer = setInterval(load, 5000);
+    const timer = setInterval(load, 15000);
     const socket = io({
       transports: ['websocket'],
       auth: { token: getToken() },
     });
     socket.on('connect', () => { setConnected(true); void alertRefresh.current?.request(); });
     socket.on('disconnect', () => setConnected(false));
+    // Telemetry về 7-8 bản/s khi bật 15 máy ảo: chỉ vẽ số live, không
+    // reload full dashboard mỗi bản (trước đây mỗi telemetry kéo theo
+    // dashboard + buildings/floors/rooms/devices + rules/schedules/logs,
+    // tự DDoS Atlas free-tier và làm chậm đường ACK của Wokwi).
+    // Reload nền 5s/lần là đủ cho aggregates; lệnh Bật/Tắt vẫn reload
+    // nhanh 250ms qua updateSoon bên dưới.
     const update = () => {
       if (refreshTimer.current) return;
+      refreshTimer.current = setTimeout(() => { refreshTimer.current = null; load(); }, 5000);
+    };
+    const updateSoon = () => {
+      if (refreshTimer.current) {
+        clearTimeout(refreshTimer.current);
+        refreshTimer.current = null;
+      }
       refreshTimer.current = setTimeout(() => { refreshTimer.current = null; load(); }, 250);
     };
     socket.on('telemetry', (sample: Row) => {
@@ -500,7 +513,7 @@ function App() {
     });
     socket.on('command', (command: any) => {
       showCommandResult(command);
-      update();
+      updateSoon();
     });
     socket.on('alert', (e: any) => {
       traceAlerts('socket.received', { alertId: e.id });

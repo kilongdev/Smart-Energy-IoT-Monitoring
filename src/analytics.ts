@@ -31,45 +31,42 @@ export class Analytics implements OnApplicationBootstrap, OnModuleDestroy {
   ) {}
 
   onApplicationBootstrap() {
+    // Rollup giờ không cần chạy mỗi 2s: flush mỗi lần quét cả giờ telemetry
+    // (hàng nghìn docs) trên Atlas free-tier, chặn event-loop và làm chậm
+    // đường ACK/Wokwi. Chạy 15s/lần, mỗi lần tối đa 30 giờ là đủ.
     this.timer = setInterval(() => {
       this.flush().catch((error) => {
         this.log.error(error.message);
       });
-    }, 2000);
+    }, 15000);
   }
 
   onModuleDestroy() {
     clearInterval(this.timer);
   }
 
-  // Đánh dấu các khoảng giờ cần tính lại khi có mẫu đo mới.
+  // Đánh dấu các khoảng giờ cần tính lại khi mẫu đo mới đến.
+  // Chỉ đánh dấu giờ hiện tại (1 upsert thay vì 3): mẫu đến sai thứ tự
+  // gần ranh giới giờ cực hiếm với fleet 2-5s, còn flush vẫn quét overlap
+  // ±gap khi tính nên không mất điện năng. Giảm 3x write lên Atlas.
   async dirty(deviceId: string, time: Date) {
     const hour = +hourStart(time);
 
-    // Mẫu đến sai thứ tự gần ranh giới giờ có thể ảnh hưởng giờ liền kề.
-    const affectedHours = [
-      hour - HOUR,
-      hour,
-      hour + HOUR,
-    ];
-
-    await Promise.all(affectedHours.map(async affectedHour => {
-      await this.db.collection('dirty_hours').updateOne(
-        {
-          _id: `${deviceId}:${affectedHour}`,
+    await this.db.collection('dirty_hours').updateOne(
+      {
+        _id: `${deviceId}:${hour}`,
+      },
+      {
+        $set: {
+          deviceId,
+          hour: new Date(hour),
         },
-        {
-          $set: {
-            deviceId,
-            hour: new Date(affectedHour),
-          },
-          $inc: {
-            revision: 1,
-          },
+        $inc: {
+          revision: 1,
         },
-        { upsert: true },
-      );
-    }));
+      },
+      { upsert: true },
+    );
   }
 
   // Tính lại điện năng cho các khoảng giờ đã được đánh dấu.
@@ -81,10 +78,13 @@ export class Analytics implements OnApplicationBootstrap, OnModuleDestroy {
     this.busy = true;
 
     try {
+      // Mỗi flush chỉ xử lý tối đa 30 giờ: trước đây limit 150 + chạy mỗi
+      // 2s nên Atlas free-tier bị quét hàng nghìn docs telemetry liên tục,
+      // chặn event-loop và làm chậm đường ACK/telemetry của Wokwi.
       const tasks = await this.db
         .collection('dirty_hours')
         .find()
-        .limit(150)
+        .limit(30)
         .toArray();
 
       for (const task of tasks) {
