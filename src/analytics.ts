@@ -53,7 +53,7 @@ export class Analytics implements OnApplicationBootstrap, OnModuleDestroy {
       hour + HOUR,
     ];
 
-    for (const affectedHour of affectedHours) {
+    await Promise.all(affectedHours.map(async affectedHour => {
       await this.db.collection('dirty_hours').updateOne(
         {
           _id: `${deviceId}:${affectedHour}`,
@@ -69,7 +69,7 @@ export class Analytics implements OnApplicationBootstrap, OnModuleDestroy {
         },
         { upsert: true },
       );
-    }
+    }));
   }
 
   // Tính lại điện năng cho các khoảng giờ đã được đánh dấu.
@@ -233,6 +233,7 @@ export class Analytics implements OnApplicationBootstrap, OnModuleDestroy {
     user: User,
     buildingId?: string,
     roomId?: string,
+    floorId?: string,
   ) {
     const { a, b } = this.range(from, to, 366);
 
@@ -265,6 +266,13 @@ export class Analytics implements OnApplicationBootstrap, OnModuleDestroy {
     if (roomId) {
       await this.catalog.get('rooms', roomId, user);
       query.ma_phong = roomId;
+    }
+
+    if (floorId) {
+      await this.catalog.get('floors', floorId, user);
+      const rooms = await this.db.collection('rooms').find({ ma_tang: floorId }).toArray();
+      const ids = rooms.map(room => room._id);
+      query.ma_phong = { $in: roomId ? ids.filter(id => id === roomId) : ids };
     }
 
     const results = await this.db

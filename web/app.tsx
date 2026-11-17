@@ -1,3 +1,7 @@
+import { ControlPage } from './ControlPage';
+import { mergeAlertRecords, isAlertOpen } from './alert-records';
+import { updateLiveReading, preserveNewerReadings } from './live-readings';
+import { HeatPlan } from './HeatPlan';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as echarts from 'echarts';
@@ -38,6 +42,8 @@ function Icon({ name }: { name: string }) {
     alert: 'm12 3 10 18H2z M12 9v5 M12 17v1',
     bell: 'M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9 M10 21h4',
     control: 'M12 2v10 M6 5a9 9 0 1 0 12 0',
+    clock: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M12 7v5l3 2',
+    info: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M12 11v6 M12 7v.1',
     schedule: 'M8 2v4 M16 2v4 M3 10h18 M3 4h18v17H3z M8 14h3 M8 17h6',
     catalog: 'M3 7h18v14H3z M3 7l3-4h12l3 4 M8 12h8',
     logs: 'M5 3h14v18H5z M8 8h8 M8 12h8 M8 16h5',
@@ -337,6 +343,9 @@ function App() {
     [schedules, setSchedules] = useState<Row[]>([]),
     [logs, setLogs] = useState<Row[]>([]);
   const [activeAlerts, setActiveAlerts] = useState<Row[]>([]);
+  const [deviceLoadError, setDeviceLoadError] = useState('');
+  const [alertsReady, setAlertsReady] = useState(false);
+  const [alertsLoadError, setAlertsLoadError] = useState('');
   const [deviceSetup, setDeviceSetup] = useState<Row | null>(null);
   const bellRef = useRef<HTMLDivElement>(null);
 
@@ -347,7 +356,7 @@ function App() {
     [error, setError] = useState(''),
     [dialog, setDialog] = useState<any>(null),
     [saving, setSaving] = useState(false);
-  const [building, setBuilding] = useState(''),
+  const [scopeFloor, setScopeFloor] = useState(''),
     [selectedDevice, setSelectedDevice] = useState(''),
     [samples, setSamples] = useState<Row[]>([]),
     [energy, setEnergy] = useState<Row[]>([]),
@@ -390,7 +399,7 @@ function App() {
     setUser(null);
     setTab('dashboard');
     setDialog(null);
-    setBuilding('');
+    setScopeFloor('');
     setSelectedDevice('');
   }, []);
   useEffect(() => {
@@ -403,8 +412,10 @@ function App() {
     else setAuthLoading(false);
     return () => window.removeEventListener('energy-logout', logout);
   }, []);
+  const loadingRequest = useRef(false);
   const load = useCallback(async () => {
-    if (!user) return;
+    if (!user || loadingRequest.current) return;
+    loadingRequest.current = true;
     try {
       const names = [
         'buildings',
@@ -418,7 +429,8 @@ function App() {
         api('alerts/active'),
         ...names.map((x) => api(x)),
       ]);
-      setData(dash);
+      setDeviceLoadError('');
+      setData(current => preserveNewerReadings(dash, current));
       setActiveAlerts(active);
       setLists(Object.fromEntries(names.map((n, i) => [n, values[i]])));
       if (manager) {
@@ -435,9 +447,15 @@ function App() {
         setRules(r);
         setSchedules(s);
         setLogs(l);
+        setAlertsReady(true);
+        setAlertsLoadError('');
       }
     } catch (e: any) {
       setError(e.message);
+      setAlertsLoadError(e.message);
+      setDeviceLoadError(e.message);
+    } finally {
+      loadingRequest.current = false;
     }
   }, [user, admin, manager]);
   useEffect(() => {
@@ -451,10 +469,15 @@ function App() {
     socket.on('connect', () => setConnected(true));
     socket.on('disconnect', () => setConnected(false));
     const update = () => {
-      clearTimeout(refreshTimer.current);
-      refreshTimer.current = setTimeout(load, 250);
+      if (refreshTimer.current) return;
+      refreshTimer.current = setTimeout(() => { refreshTimer.current = null; load(); }, 250);
     };
-    socket.on('telemetry', update);
+    socket.on('telemetry', (sample: Row) => {
+      // The backend has already processed this reading. Display it immediately;
+      // the throttled reload updates aggregates without starving under traffic.
+      setData(previous => updateLiveReading(previous, sample));
+      update();
+    });
     socket.on('command', (command: any) => {
       showCommandResult(command);
       update();
@@ -467,14 +490,22 @@ function App() {
     return () => {
       clearInterval(timer);
       clearTimeout(refreshTimer.current);
+      refreshTimer.current = null;
       socket.disconnect();
     };
   }, [user, load]);
+  const building = lists.floors?.find((f: Row) => f._id === scopeFloor)?.buildingId || '';
+  const inScope = (r: Row) => {
+    if (!scopeFloor) return true;
+    const roomId = r.ma_phong || lists.devices?.find((d: Row) => d._id === r.ma_thiet_bi)?.ma_phong;
+    return r.ma_tang === scopeFloor || lists.rooms?.some((room: Row) => room._id === roomId && room.ma_tang === scopeFloor);
+  };
   const visibleDevices = data.devices.filter(
-    (d: Row) => !building || d.buildingId === building,
+    (d: Row) => inScope(d),
   );
-  const deviceId = selectedDevice || visibleDevices[0]?._id;
+  const deviceId = visibleDevices.some((d: Row) => d._id === selectedDevice) ? selectedDevice : visibleDevices[0]?._id;
   useEffect(() => {
+    setSamples([]);
     if (!user || !deviceId) return;
     let stop = false;
     async function fetchHistory() {
@@ -499,12 +530,13 @@ function App() {
   useEffect(() => {
     if (!user) return;
     let stop = false;
+    setEnergy([]);
     async function fetchEnergy() {
       try {
         const end = Math.floor(Date.now() / 3600000) * 3600000;
         const days = period === 'day' ? 7 : period === 'week' ? 28 : 90;
         const r = await api(
-          `analytics/energy?from=${new Date(end - days * 86400000).toISOString()}&to=${new Date(end).toISOString()}&period=${period}${building ? '&buildingId=' + building : ''}`,
+          `analytics/energy?from=${new Date(end - days * 86400000).toISOString()}&to=${new Date(end).toISOString()}&period=${period}${scopeFloor ? '&floorId=' + scopeFloor : ''}`,
         );
         if (!stop) setEnergy(r.data);
       } catch (e: any) {
@@ -517,7 +549,7 @@ function App() {
       stop = true;
       clearInterval(t);
     };
-  }, [user, building, period]);
+  }, [user, scopeFloor, period]);
   useEffect(() => {
     if (notice) {
       const t = setTimeout(() => setNotice(''), 7000);
@@ -617,7 +649,7 @@ function App() {
   }
   const run = (...args: Parameters<typeof change>) =>
     change(...args).catch(() => {});
-  const edit = (kind: string, record?: Row) => setDialog({ kind, record });
+  const edit = (kind: string, record?: Row) => { setError(''); setDialog({ kind, record }); };
   if (authLoading)
     return <div className="loading">Đang kiểm tra phiên đăng nhập…</div>;
   if (!user) return <Login done={setUser} />;
@@ -626,7 +658,7 @@ function App() {
     .reduce((s: number, d: Row) => s + (d.latest?.cong_suat_w || 0), 0);
   const selected = visibleDevices.find((d: Row) => d._id === deviceId);
   const selectedOnline = !!selected?.online;
-  const notifications = activeAlerts
+  const notifications = activeAlerts.filter(inScope)
       .map((item) => ({
         id: `alert-${item._id}`,
         title: item.snapshot?.rule?.ten_quy_tac || 'Cảnh báo năng lượng',
@@ -637,13 +669,14 @@ function App() {
       }));
   const notificationCount = notifications.length;
   const chartOption = {
-    animation: false,
+    animationDurationUpdate: 300,
     tooltip: { trigger: 'axis' },
     grid: { left: 52, right: 20, top: 28, bottom: 42 },
     xAxis: {
       type: 'time',
+      splitNumber: 6,
       axisLine: { lineStyle: { color: '#cad6d0' } },
-      axisLabel: { color: '#7c8983' },
+      axisLabel: { color: '#7c8983', hideOverlap: true, formatter: (v: number) => new Date(v).toLocaleTimeString('vi-VN') },
     },
     yAxis: {
       type: 'value',
@@ -654,6 +687,7 @@ function App() {
     series: [
       {
         type: 'line',
+        markLine: selected?.cong_suat_dinh_muc ? { symbol: 'none', lineStyle: { color: '#db8b8b', type: 'dashed' }, data: [{ yAxis: selected.cong_suat_dinh_muc, name: 'Định mức', label: { formatter: 'Định mức', position: 'insideEndTop', color: '#a34f4f', backgroundColor: '#fff', padding: [3, 5] } }] } : undefined,
         showSymbol: false,
         smooth: 0.2,
         lineStyle: { color: '#258369', width: 2.5 },
@@ -839,28 +873,29 @@ function App() {
           <div>
             <span className="muted">Phạm vi giám sát</span>
             <select
-              value={building}
+              value={scopeFloor}
               onChange={(e) => {
-                setBuilding(e.target.value);
+                setScopeFloor(e.target.value);
                 setSelectedDevice('');
               }}
             >
-              <option value="">Tất cả tòa nhà được cấp quyền</option>
-              {lists.buildings?.map((b: Row) => (
+              <option value="">Tất cả tầng được cấp quyền</option>
+              {lists.floors?.map((b: Row) => (
                 <option key={b._id} value={b._id}>
-                  {b.ten_toa_nha}
+                  {lists.buildings?.find((x: Row) => x._id === b.buildingId)?.ten_toa_nha} · Tầng {b.so_tang}
                 </option>
               ))}
             </select>
           </div>
-          <span className="muted small">Cập nhật: {date(data.serverTime)}</span>
+          <span className="muted small">Đồng bộ trang: {date(data.serverTime)}</span>
         </div>
         {tab === 'dashboard' && (
-          <>
-            <div className="metrics">
+          <div className="overview-page">
+            {!connected && <p className="connection-banner" role="status">Đang mất kết nối realtime · Số liệu có thể chưa cập nhật</p>}
+            <div className={'metrics' + (!data.serverTime ? ' loading-metrics' : '')} aria-busy={!data.serverTime}>
               <Metric
                 label="CÔNG SUẤT HIỆN TẠI"
-                value={fmt(power / 1000, 2)}
+                value={data.serverTime ? fmt(power / 1000, 2) : '?'}
                 unit="kW"
                 detail="Tổng công suất của các gateway phòng đang online"
                 featured
@@ -869,23 +904,23 @@ function App() {
                 label="PHÒNG ĐANG KẾT NỐI"
                 value={String(
                   data.heatmap.filter(
-                    (r: Row) => (!building || r.buildingId === building) && r.online,
+                    (r: Row) => (inScope(r)) && r.online,
                   ).length,
                 )}
                 unit={
                   '/ ' +
                   data.heatmap.filter(
-                    (r: Row) => !building || r.buildingId === building,
+                    (r: Row) => inScope(r),
                   ).length
                 }
                 detail="Phòng Online khi gateway nhận telemetry; mất dữ liệu quá 5 chu kỳ sẽ Offline"
               />
               <Metric
                 label="ĐIỆN NĂNG TRONG KỲ"
-                value={fmt(
+                value={energy.length ? fmt(
                   energy.reduce((s, x) => s + x.dien_nang_kwh, 0),
                   3,
-                )}
+                ) : '?'}
                 unit="kWh"
                 detail={
                   period === 'day'
@@ -897,21 +932,22 @@ function App() {
               />
               <Metric
                 label={manager ? 'CẢNH BÁO CHƯA XỬ LÝ' : 'PHÒNG GIÁM SÁT'}
+                danger={manager && activeAlerts.some(a => inScope(a))}
+                onClick={manager ? () => setTab('alert') : undefined}
                 value={String(
                   manager
-                    ? alerts.filter(
+                    ? activeAlerts.filter(
                         (x) =>
-                          x.tinh_trang !== 'Đã kết thúc' &&
-                          (!building || x.buildingId === building),
+                          (inScope(x)),
                       ).length
                     : data.heatmap.filter(
-                        (x: Row) => !building || x.buildingId === building,
+                        (x: Row) => inScope(x),
                       ).length,
                 )}
                 unit=""
                 detail={
                   manager
-                    ? 'Cần kiểm tra và xác nhận'
+                    ? 'Tự kết thúc khi thông số phục hồi · Xem cảnh báo'
                     : 'Trong phạm vi tài khoản'
                 }
               />
@@ -938,7 +974,7 @@ function App() {
                   </select>
                 </div>
                 {samples.length ? (
-                  <Chart option={chartOption} />
+                  <Chart height={320} option={chartOption} />
                 ) : (
                   <Empty text="Đang chờ dữ liệu từ gateway phòng…" />
                 )}
@@ -960,11 +996,11 @@ function App() {
                           {
                             type: 'gauge',
                             min: 0,
-                            max: selected?.cong_suat_dinh_muc || 2000,
+                            max: 100,
                             progress: {
                               show: true,
                               width: 12,
-                              itemStyle: { color: '#2f8b70' },
+                              itemStyle: { color: (selected?.latest?.cong_suat_w / selected?.cong_suat_dinh_muc) > .8 ? '#d45848' : (selected?.latest?.cong_suat_w / selected?.cong_suat_dinh_muc) > .5 ? '#d6a32d' : '#2f8b70' },
                             },
                             axisLine: {
                               lineStyle: { width: 12, color: [[1, '#edf2ee']] },
@@ -977,14 +1013,14 @@ function App() {
                             detail: {
                               fontSize: 25,
                               color: '#183b30',
-                              formatter: '{value} W',
+                              formatter: '{value} %',
                               offsetCenter: [0, '10%'],
                             },
                             title: { show: false },
                             data: [
                               {
                                 value: Math.round(
-                                  selected?.latest?.cong_suat_w || 0,
+                                  (selected?.latest?.cong_suat_w || 0) / (selected?.cong_suat_dinh_muc || 2000) * 100,
                                 ),
                               },
                             ],
@@ -1094,6 +1130,7 @@ function App() {
                       {
                         type: 'bar',
                         barMaxWidth: 34,
+                        markLine: { symbol: 'none', data: [{ type: 'average', name: 'Trung bình' }], label: { formatter: 'Trung bình: {c}' } },
                         itemStyle: {
                           color: '#43967a',
                           borderRadius: [5, 5, 0, 0],
@@ -1107,138 +1144,25 @@ function App() {
                 <Empty text="Chưa có dữ liệu tổng hợp. Biểu đồ kỳ này chỉ tính các giờ đã kết thúc." />
               )}
             </section>
-          </>
+            <section className="panel recent-activity"><h2>Hoạt động gần đây</h2>{[
+              ...activeAlerts.filter(a => inScope(a)).map(a => ({ id: 'a'+a._id, time: a.thoi_gian_phat_hien, text: a.noi_dung_loi || 'Cảnh báo năng lượng' })),
+              ...logs.filter(l => inScope(l)).map(l => ({ id: 'l'+l._id, time: l.thoi_gian_thuc_hien, text: `${l.hanh_dong} · ${l.trang_thai}` })),
+              ...visibleDevices.filter(d => !d.online && d.lastSeen).map(d => ({ id: 'd'+d._id, time: d.lastSeen, text: `${d.ten_thiet_bi} · Offline (lần cuối nhận dữ liệu)` })),
+            ].sort((a,b) => +new Date(b.time)-+new Date(a.time)).slice(0,5).map(e => <div className="activity-row" key={e.id}><span>{e.text}</span><small>{date(e.time)}</small></div>)}<p className="muted small">Sự kiện từ dữ liệu hệ thống hiện có.</p></section>
+          </div>
         )}
-        {tab === 'map' && (
-          <section className="panel">
-            <div className="panel-head">
-              <div>
-                <h2>Bản đồ nhiệt theo phòng</h2>
-                <p className="muted">
-                  Màu theo tỷ lệ công suất hiện tại / tổng công suất định mức
-                </p>
-              </div>
-              <div className="legend">
-                <span>● &lt;50%</span>
-                <span>● 50–80%</span>
-                <span>● &gt;80%</span>
-              </div>
-            </div>
-            <div className="heatmap">
-              {data.heatmap
-                .filter((r: Row) => !building || r.buildingId === building)
-                .map((r: Row) => (
-                  <article
-                    key={r.ma_phong}
-                    className={'heat ' + r.muc_do_canh_bao}
-                  >
-                    <div>
-                      {r.ten_phong}
-                      <small>
-                        Tầng{' '}
-                        {
-                          lists.floors?.find((f: Row) => f._id === r.ma_tang)
-                            ?.so_tang
-                        }
-                      </small>
-                    </div>
-                    <strong>
-                      {fmt(r.tong_cong_suat_w / 1000, 2)} <small>kW</small>
-                    </strong>
-                    <span>
-                      {r.online ? 'Gateway phòng online' : 'Gateway phòng offline'}
-                    </span>
-                  </article>
-                ))}
-            </div>
-          </section>
-        )}
-        {tab === 'control' && (
-          <>
-            <p className="info-text">
-              Lệnh chuyển sang “Thành công” sau khi thiết bị xác nhận. Nếu quá 10
-              giây chưa có ACK, kết quả là “Chưa xác định”; ACK đến muộn sẽ cập nhật
-              lại kết quả theo phản hồi thiết bị.
-            </p>
-            <div className="device-grid">
-              {visibleDevices.map((d: Row) => (
-                <section className="panel device" key={d._id}>
-                  <div className="panel-head">
-                    <span className="device-icon">
-                      <Icon name="control" />
-                    </span>
-                    <Badge value={d.online} />
-                  </div>
-                  <h2>
-                    Gateway ·{' '}
-                    {lists.rooms?.find((r: Row) => r._id === d.ma_phong)
-                      ?.ten_phong || d.ten_thiet_bi}
-                  </h2>
-                  <p className="muted">
-                    {
-                      lists.rooms?.find((r: Row) => r._id === d.ma_phong)
-                        ?.ten_phong
-                    }
-                  </p>
-                  <div className="device-power">
-                    {fmt(d.latest?.cong_suat_w)} <small>W</small>
-                  </div>
-                  <div className="device-state">
-                    Relay báo về:{' '}
-                    <strong>
-                      {d.trang_thai_relay === undefined
-                        ? 'Chưa có'
-                        : d.trang_thai_relay
-                          ? 'Bật'
-                          : 'Tắt'}
-                    </strong>
-                  </div>
-                  {d.pendingCommand ? (
-                    <p className="pending">Đang chờ phản hồi thiết bị…</p>
-                  ) : (
-                    <div className="button-row">
-                      <button
-                        disabled={!d.online || !d.cho_phep_dieu_khien || saving}
-                        onClick={() =>
-                          run(
-                            `control/devices/${d._id}/switch`,
-                            'POST',
-                            { hanh_dong: 'Bật' },
-                            'Đã tạo lệnh Bật; đang chờ ACK',
-                          )
-                        }
-                      >
-                        Bật
-                      </button>
-                      <button
-                        disabled={!d.online || !d.cho_phep_dieu_khien || saving}
-                        onClick={() =>
-                          run(
-                            `control/devices/${d._id}/switch`,
-                            'POST',
-                            { hanh_dong: 'Tắt' },
-                            'Đã tạo lệnh Tắt; đang chờ ACK',
-                          )
-                        }
-                      >
-                        Tắt
-                      </button>
-                    </div>
-                  )}
-                </section>
-              ))}
-            </div>
-            {!visibleDevices.length && (
-              <Empty text="Chưa có thiết bị trong phạm vi này" />
-            )}
-          </>
-        )}
+        {tab === 'map' && <HeatPlan rooms={data.heatmap.filter((r: Row) => inScope(r))} floors={lists.floors || []} buildings={lists.buildings || []} devices={data.devices} alerts={activeAlerts} />}
+        {tab === 'control' && <ControlPage key={scopeFloor} devices={visibleDevices} rooms={lists.rooms || []} commands={logs} popup={commandPopup} connected={connected} loading={!data.serverTime} error={deviceLoadError} retry={load} saving={saving} run={run} Chart={Chart} Icon={Icon} Metric={Metric} />}
         {tab === 'alert' && (
           <AlertPage
+            activeAlerts={activeAlerts.filter(inScope)}
+            loading={!alertsReady}
+            loadError={alertsLoadError}
+            retry={load}
             alerts={alerts.filter(
-              (a) => !building || a.buildingId === building,
+              (a) => inScope(a),
             )}
-            rules={rules.filter((a) => !building || a.buildingId === building)}
+            rules={rules.filter((a) => inScope(a))}
             devices={data.devices}
             roomList={lists.rooms}
             edit={edit}
@@ -1247,9 +1171,11 @@ function App() {
           />
         )}
         {tab === 'schedule' && (
-          <section className="panel">
+          <section className="panel management-page schedule-page">
             <div className="panel-head">
+              <span className="management-icon" aria-hidden="true"><Icon name="schedule" /></span>
               <div>
+                <p className="management-eyebrow">TỰ ĐỘNG HÓA</p>
                 <h2>Lịch điều khiển</h2>
                 <p className="muted small">
                   Mỗi lịch thực hiện một hành động · Múi giờ Asia/Ho_Chi_Minh
@@ -1259,6 +1185,7 @@ function App() {
                 + Thêm lịch
               </button>
             </div>
+            <div className="management-context"><span className="inline-ui-icon" aria-hidden="true"><Icon name="clock" /></span><span>Lịch lặp theo giờ Việt Nam. Mỗi dòng là một hành động đã cấu hình.</span></div>
             <Table
               heads={[
                 'Thiết bị',
@@ -1269,13 +1196,13 @@ function App() {
                 'Thao tác',
               ]}
               rows={schedules
-                .filter((s) => !building || s.buildingId === building)
+                .filter((s) => inScope(s))
                 .map((s) => [
                   data.devices.find((d: Row) => d._id === s.ma_thiet_bi)
                     ?.ten_thiet_bi,
-                  s.hanh_dong,
-                  s.gio_bat_dau,
-                  s.ngay_lap_lai,
+                  <span className="management-action"><span className="inline-ui-icon" aria-hidden="true"><Icon name="control" /></span> {s.hanh_dong}</span>,
+                  <span className="schedule-clock">{s.gio_bat_dau}</span>,
+                  <span className="schedule-days">{s.ngay_lap_lai}</span>,
                   <Badge value={s.bat ? 'Đang bật' : 'Đang tắt'} />,
                   <div className="actions">
                     <button onClick={() => edit('schedules', s)}>Sửa</button>
@@ -1303,15 +1230,18 @@ function App() {
           </section>
         )}
         {tab === 'logs' && (
-          <section className="panel">
+          <section className="panel management-page history-page">
             <div className="panel-head">
+              <span className="management-icon" aria-hidden="true"><Icon name="logs" /></span>
               <div>
+                <p className="management-eyebrow">LỊCH SỬ VẬN HÀNH</p>
                 <h2>Nhật ký lệnh</h2>
                 <p className="muted small">
                   Tối đa 500 lệnh gần nhất · Trạng thái lấy từ phản hồi thiết bị
                 </p>
               </div>
             </div>
+            <div className="management-context"><span className="inline-ui-icon" aria-hidden="true"><Icon name="info" /></span><span>Kết quả lệnh được giữ nguyên theo hệ thống. Thông tin ACK và lỗi hiển thị tại cột Chi tiết.</span></div>
             <Table
               heads={[
                 'Thời điểm',
@@ -1322,13 +1252,13 @@ function App() {
                 'Chi tiết',
               ]}
               rows={logs
-                .filter((l) => !building || l.buildingId === building)
+                .filter((l) => inScope(l))
                 .map((l) => [
-                  date(l.thoi_gian_thuc_hien),
+                  <span className="history-time">{date(l.thoi_gian_thuc_hien)}</span>,
                   data.devices.find((d: Row) => d._id === l.ma_thiet_bi)
                     ?.ten_thiet_bi || l.ma_thiet_bi,
-                  l.hanh_dong,
-                  l.nguon,
+                  <span className="management-action"><span className="inline-ui-icon" aria-hidden="true"><Icon name="control" /></span> {l.hanh_dong}</span>,
+                  <span className="history-source">{l.nguon}</span>,
                   <Badge value={l.trang_thai} />,
                   l.loi ||
                     (l.lateAck
@@ -1341,7 +1271,7 @@ function App() {
           </section>
         )}
         {tab === 'catalog' && (
-          <CatalogPage lists={lists} edit={edit} run={run} setup={setDeviceSetup} />
+          <CatalogPage scopeFloor={scopeFloor} inScope={inScope} building={building} lists={lists} edit={edit} run={run} setup={setDeviceSetup} />
         )}
         <footer>
           SMART ENERGY IOT <span>Giám sát · Cảnh báo · Điều khiển</span>
@@ -1377,9 +1307,9 @@ function App() {
     </div>
   );
 }
-function Metric({ label, value, unit, detail, featured = false }: any) {
+function Metric({ label, value, unit, detail, featured = false, danger = false, onClick }: any) {
   return (
-    <section className={'metric ' + (featured ? 'featured' : '')}>
+    <section className={'metric ' + (featured ? 'featured' : '') + (danger ? ' metric-danger' : '')} role={onClick ? 'button' : undefined} tabIndex={onClick ? 0 : undefined} onClick={onClick} onKeyDown={e => { if (onClick && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onClick(); } }}>
       <div className="metric-label">{label}</div>
       <div className="metric-number">
         {value}
@@ -1419,6 +1349,7 @@ function Table({ heads, rows }: any) {
   );
 }
 function AlertPage({
+  activeAlerts, loading, loadError, retry,
   alerts,
   rules,
   devices,
@@ -1429,12 +1360,54 @@ function AlertPage({
 }: any) {
   const [focusedAlert, setFocusedAlert] = useState(new URLSearchParams(location.search).get('alert') || ''),
     [severity, setSeverity] = useState(''),
-    [room, setRoom] = useState(''),
     [incidentState, setIncidentState] = useState(new URLSearchParams(location.search).has('alert') ? '' : 'active'),
     [since, setSince] = useState('');
-  const roomIds = [...new Set<string>(devices.map((d: Row) => d.ma_phong))];
+  const [search, setSearch] = useState('');
+  const [type, setType] = useState('');
+  const [detailId, setDetailId] = useState('');
+  const detailRef = useRef<HTMLDivElement>(null);
+  // Active notifications are projections, not full incident records.
+  // Prefer history so Telegram delivery and recovery details are preserved.
+  const merged: Row[] = mergeAlertRecords(alerts, activeAlerts);
+  const isOpen = isAlertOpen;
+  const ruleOf = (a: Row) => a.snapshot?.rule || rules.find((r: Row) => r._id === a.ma_quy_tac) || {};
+  const deviceName = (a: Row) => devices.find((d: Row) => d._id === a.ma_thiet_bi)?.ten_thiet_bi || a.ma_thiet_bi;
+  const roomName = (a: Row) => roomList.find((r: Row) => r._id === a.ma_phong)?.ten_phong || 'Chưa có thông tin phòng';
+  const sinceTime = since ? +new Date(since + 'T00:00:00+07:00') : 0;
+  const open: Row[] = merged.filter(isOpen);
+  const recovered = merged.filter(a => !isOpen(a) && (!since || +new Date(a.ket_thuc_luc || a.lastSeen) >= sinceTime));
+  const types = [...new Set(merged.map(a => ruleOf(a).ten_quy_tac).filter(Boolean))];
+  const visible = merged.filter(a =>
+    (!incidentState || (incidentState === 'active' ? isOpen(a) : incidentState === 'recovering' ? a.tinh_trang === 'Đang phục hồi' : !isOpen(a))) &&
+    (!focusedAlert || a._id === focusedAlert) && (!severity || a.muc_do === severity) &&
+    (!type || ruleOf(a).ten_quy_tac === type) && (!since || +new Date(a.thoi_gian_phat_hien) >= sinceTime) &&
+    `${roomName(a)} ${deviceName(a)} ${ruleOf(a).ten_quy_tac || ''}`.toLocaleLowerCase('vi').includes(search.trim().toLocaleLowerCase('vi'))
+  ).sort((a,b) => Number(isOpen(b))-Number(isOpen(a)) || Number(b.muc_do==='HIGH')-Number(a.muc_do==='HIGH') || +new Date(b.thoi_gian_phat_hien)-+new Date(a.thoi_gian_phat_hien));
+  useEffect(() => {
+    if (!detailId) return;
+    const trigger = document.activeElement as HTMLElement;
+    const key = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setDetailId('');
+      if (e.key === 'Tab') {
+        const nodes = detailRef.current?.querySelectorAll<HTMLElement>('button, [href], input, select, [tabindex="0"]');
+        if (!nodes?.length) return;
+        const first = nodes[0], last = nodes[nodes.length-1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    };
+    detailRef.current?.querySelector('button')?.focus();
+    document.addEventListener('keydown',key);
+    return () => { document.removeEventListener('keydown',key); trigger?.focus(); };
+  },[detailId]);
   return (
-    <>
+    <div className="alerts-page">
+      <div className={'metrics alerts-kpis' + (loading ? ' loading-metrics' : '')} aria-busy={loading}>
+        <Metric label="CẢNH BÁO ĐANG HOẠT ĐỘNG" value={loading || loadError ? '—' : open.length} detail="Sự cố chưa phục hồi trong phạm vi" featured />
+        <Metric label="⚠ CẢNH BÁO NGHIÊM TRỌNG" value={loading || loadError ? '—' : open.filter(a => a.muc_do === 'HIGH').length} detail="Mức cao · Critical đang hoạt động" danger={open.some(a => a.muc_do === 'HIGH')} />
+        <Metric label="✓ ĐÃ PHỤC HỒI" value={loading || loadError ? '—' : recovered.length} detail={since ? 'Phục hồi từ ngày đã chọn · trong lịch sử đã tải' : 'Trong lịch sử đã tải'} />
+        <Metric label="THIẾT BỊ CÓ CẢNH BÁO" value={loading || loadError ? '—' : new Set(open.map(a => a.ma_thiet_bi)).size} detail="Thiết bị có ít nhất một sự cố đang hoạt động" />
+      </div>
       <section className="panel">
         <div className="panel-head">
           <div>
@@ -1444,6 +1417,7 @@ function AlertPage({
               Đây là kết luận theo dữ liệu đo, không phải xác nhận an toàn điện.
             </p>
           </div>
+          <span className="alert-count">{loading || loadError ? '—' : visible.length} sự cố</span>
         </div>
         <div className="filters">
           {focusedAlert && <button onClick={() => {
@@ -1452,6 +1426,7 @@ function AlertPage({
             history.replaceState(null, '', url);
           }}>Bỏ lọc mã sự cố</button>}
           <select
+            aria-label="Trạng thái sự cố"
             value={incidentState}
             onChange={(e) => setIncidentState(e.target.value)}
           >
@@ -1461,6 +1436,7 @@ function AlertPage({
             <option value="">Tất cả sự cố</option>
           </select>
           <select
+            aria-label="Mức độ cảnh báo"
             value={severity}
             onChange={(e) => setSeverity(e.target.value)}
           >
@@ -1475,15 +1451,6 @@ function AlertPage({
               </option>
             ))}
           </select>
-          <select value={room} onChange={(e) => setRoom(e.target.value)}>
-            <option value="">Tất cả phòng</option>
-            {roomIds.map((r) => (
-              <option key={r} value={r}>
-                {roomList.find((item: Row) => item._id === r)?.ten_phong ||
-                  `Phòng ${r}`}
-              </option>
-            ))}
-          </select>
           <label className="inline-label">
             Từ ngày
             <input
@@ -1492,7 +1459,23 @@ function AlertPage({
               onChange={(e) => setSince(e.target.value)}
             />
           </label>
+          <select aria-label="Loại sự cố" value={type} onChange={e=>setType(e.target.value)}><option value="">Tất cả loại sự cố</option>{types.map(t=><option key={t} value={t}>{t}</option>)}</select>
+          <input aria-label="Tìm phòng hoặc thiết bị" placeholder="Tìm phòng / thiết bị…" value={search} onChange={e=>setSearch(e.target.value)} />
         </div>
+        {loadError ? <div className="alert-empty error" role="alert"><strong>Không tải được dữ liệu cảnh báo</strong><p>{loadError}</p><button onClick={retry}>Thử lại</button></div> : loading ? <div className="alert-skeleton" role="status">Đang tải cảnh báo…</div> : visible.length ? <div className="incident-list">{visible.map(a => {
+          const r = ruleOf(a), value = a.snapshot?.sample?.[r.chi_so_can_do];
+          const gateway = devices.find((d: Row) => d._id === a.ma_thiet_bi);
+          const liveValue = gateway?.latest?.[r.chi_so_can_do];
+          const tone = !isOpen(a) ? 'recovered' : a.muc_do === 'HIGH' ? 'critical' : 'warning';
+          return <article className={'incident-card '+tone} key={a._id}>
+            <span className="incident-symbol" aria-hidden="true">{isOpen(a)?'!':'✓'}</span>
+            <div className="incident-copy"><div className="incident-heading"><strong>{roomName(a)}</strong><span className={'incident-badge '+tone}>{a.muc_do==='HIGH'?'Nghiêm trọng':a.muc_do==='MEDIUM'?'Cảnh báo':'Thấp'}</span></div><p>{r.ten_quy_tac || 'Bất thường'} · {deviceName(a)}</p><small>{Number.isFinite(value) ? `Mẫu đánh giá sự cố: ${fmt(value,2)} ${alertMetricUnits[r.chi_so_can_do] || ''} · ` : ''}{r.chi_so_can_do ? formatAlertCondition(r) : a.noi_dung_loi}</small><small style={{display:'block'}}>Mẫu hợp lệ đo lúc: {date(a.measuredAt || a.snapshot?.sample?.thoi_gian_do)} · Nhận lúc: {date(a.receivedAt || a.lastSeen)}</small>{Number.isFinite(liveValue) && <small style={{display:'block'}}>Gateway {gateway?.online ? 'mới nhất' : 'lần cuối'}: {fmt(liveValue,2)} {alertMetricUnits[r.chi_so_can_do] || ''} · Đo lúc {date(gateway?.latest?.thoi_gian_do)} · Nhận lúc {date(gateway?.latest?.receivedAt)}</small>}{a.recoveryInterruptedReason && <small role="status" style={{display:'block',color:'var(--danger, #b54737)'}}>{a.recoveryInterruptedReason}</small>}</div>
+            <div className="incident-time"><span className={'incident-badge '+tone}>{!isOpen(a)?'Đã phục hồi':a.tinh_trang==='Đang phục hồi'?'Đang phục hồi':'Đang diễn ra'}</span><small>Phát sinh: {date(a.thoi_gian_phat_hien)}</small>{a.monitoringPaused && <small>Quy tắc tạm dừng</small>}</div>
+            <button onClick={()=>setDetailId(a._id)}>Xem chi tiết</button>
+          </article>;
+        })}</div> : <div className="alert-empty"><span className="empty-check">✓</span><div><strong>Không có sự cố cần theo dõi</strong><p>Các thiết bị trong phạm vi giám sát hiện không có cảnh báo phù hợp với bộ lọc.</p></div></div>}
+        <p className="muted small">Danh sách theo lịch sử backend đã trả về; KPI đang hoạt động lấy từ danh sách sự cố mở. Thời gian hiển thị theo Việt Nam.</p>
+        {detailId && <div className="modal-backdrop" onClick={e=>{if(e.target===e.currentTarget)setDetailId('');}}><div className="modal alert-detail" ref={detailRef} role="dialog" aria-modal="true" aria-labelledby="alert-detail-title"><div className="panel-head"><h2 id="alert-detail-title">Chi tiết cảnh báo</h2><button aria-label="Đóng chi tiết" onClick={()=>setDetailId('')}>×</button></div>
         <Table
           heads={[
             'Thời điểm',
@@ -1501,19 +1484,7 @@ function AlertPage({
             'Tình trạng',
             'Telegram',
           ]}
-          rows={alerts
-            .filter(
-              (a: Row) =>
-                (!incidentState ||
-                  (incidentState === 'active'
-                    ? (a.isOpen ?? a.tinh_trang !== 'Đã kết thúc')
-                    : incidentState === 'recovering' ? a.tinh_trang === 'Đang phục hồi'
-                    : a.tinh_trang === 'Đã kết thúc')) &&
-                (!focusedAlert || a._id === focusedAlert) &&
-                (!severity || a.muc_do === severity) &&
-                (!room || a.ma_phong === room) &&
-                (!since || new Date(a.thoi_gian_phat_hien) >= new Date(since)),
-            )
+          rows={merged.filter((a: Row) => a._id === detailId)
             .map((a: Row) => [
                 <span className="wrap">
                   <span>Bắt đầu: {date(a.thoi_gian_phat_hien)}</span>
@@ -1527,6 +1498,7 @@ function AlertPage({
                 {a.supersededBy && <small>Đã gộp vào cảnh báo {a.supersededBy}</small>}
                 <small>{a.occurrences} lần ghi nhận</small>
                 <small>Số đo cập nhật: {date(a.lastSeen)}</small>
+                {a.recoveryInterruptedReason && <small>{a.recoveryInterruptedReason}</small>}
                 {a.tinh_trang !== 'Đã kết thúc' && a.lastSeen &&
                   Date.now() - +new Date(a.lastSeen) >
                     (devices.find((d: Row) => d._id === a.ma_thiet_bi)?.chu_ky_gui || 5) * 5000 &&
@@ -1548,6 +1520,7 @@ function AlertPage({
               </span>,
             ])}
         />
+        </div></div>}
       </section>
       <section className="panel">
         <div className="panel-head">
@@ -1557,11 +1530,11 @@ function AlertPage({
               Chỉ phát cảnh báo khi vi phạm đủ thời gian duy trì
             </p>
           </div>
-          <button className="primary" onClick={() => edit('rules')}>
+          <button className="primary" disabled={saving || loading || !!loadError} onClick={() => edit('rules')}>
             + Thêm quy tắc
           </button>
         </div>
-        <Table
+        {loading ? <div className="alert-skeleton" role="status">Đang tải quy tắc…</div> : loadError ? <p role="status">Quy tắc chưa được cập nhật. Vui lòng thử tải lại dữ liệu.</p> : <Table
           heads={[
             'Tên quy tắc',
             'Điều kiện',
@@ -1582,8 +1555,9 @@ function AlertPage({
             Math.max(r.cooldown || 300, 300) + ' giây',
             <Badge value={r.bat ? 'Đang bật' : 'Tạm dừng'} />,
             <div className="actions">
-              <button onClick={() => edit('rules', r)}>Sửa</button>
+              <button disabled={saving} onClick={() => edit('rules', r)}>Sửa</button>
               <button
+                disabled={saving}
                 onClick={() =>
                   run('alerts/rules/' + r._id, 'PATCH', { bat: !r.bat })
                 }
@@ -1592,9 +1566,9 @@ function AlertPage({
               </button>
             </div>,
           ])}
-        />
+        />}
       </section>
-    </>
+    </div>
   );
 }
 const kindLabels: Record<string, string> = {
@@ -1644,22 +1618,38 @@ function DeviceSetup({ device, rooms, close }: { device: Row; rooms: Row[]; clos
   </div>;
 }
 
-function CatalogPage({ lists, edit, run, setup }: any) {
+function CatalogPage({ lists, edit, run, setup, building, scopeFloor, inScope }: any) {
   const [kind, setKind] = useState('buildings');
+  const [deleting, setDeleting] = useState('');
+  const location = (r: Row) => {
+    const room = kind === 'rooms' ? r : lists.rooms?.find((x: Row) => x._id === r.ma_phong);
+    const floor = kind === 'floors' ? r : lists.floors?.find((x: Row) => x._id === room?.ma_tang);
+    const building = lists.buildings?.find((x: Row) => x._id === r.buildingId);
+    return { room, floor, building };
+  };
+  const rows = (lists[kind] || []).filter((r: Row) => {
+    if (!building) return true;
+    if (kind === 'users') return r.vai_tro === 'Admin' || (r.buildingIds || []).includes(building);
+    if (kind === 'buildings') return r._id === building;
+    if (kind === 'floors') return r._id === scopeFloor;
+    return inScope(kind === 'rooms' ? { ...r, ma_phong: r._id } : r);
+  }).sort((a: Row, b: Row) => String(a.ten_toa_nha || a.ten_phong || a.ten_thiet_bi || a.tai_khoan || a.so_tang).localeCompare(String(b.ten_toa_nha || b.ten_phong || b.ten_thiet_bi || b.tai_khoan || b.so_tang), 'vi', { numeric: true }));
   const fields: Record<string, string[]> = {
     buildings: ['ten_toa_nha', 'dia_chi'],
     floors: ['so_tang', 'ma_toa_nha'],
-    rooms: ['ten_phong', 'loai_phong'],
+    rooms: ['ten_phong', 'ma_toa_nha', 'so_tang', 'loai_phong'],
     devices: ['ten_thiet_bi', 'ma_phong', 'online', 'chu_de_mqtt', 'chu_ky_gui'],
-    users: ['tai_khoan', 'ho_ten', 'vai_tro'],
+    users: ['tai_khoan', 'ho_ten', 'vai_tro', 'active'],
   };
   return (
-    <section className="panel">
+    <section className="panel management-page administration-page">
+      <div className="administration-heading"><span className="management-icon" aria-hidden="true"><Icon name="catalog" /></span><div><p className="management-eyebrow">CẤU TRÚC HỆ THỐNG</p><h2>Quản lý danh mục</h2><p className="muted small">Tòa nhà → Tầng → Phòng → Thiết bị</p></div></div>
       <div className="panel-head">
-        <div className="tabs">
+        <div className="tabs" aria-label="Danh mục quản trị">
           {Object.keys(fields).map((k) => (
             <button
               className={kind === k ? 'selected' : ''}
+              aria-pressed={kind === k}
               onClick={() => setKind(k)}
               key={k}
             >
@@ -1671,6 +1661,7 @@ function CatalogPage({ lists, edit, run, setup }: any) {
           + Thêm {kindLabels[kind].toLowerCase()}
         </button>
       </div>
+      <div className="administration-caption"><h3>{kindLabels[kind]}</h3><span>Danh sách theo phạm vi giám sát đang chọn</span></div>
       <Table
         heads={[
           ...fields[kind].map(
@@ -1691,19 +1682,22 @@ function CatalogPage({ lists, edit, run, setup }: any) {
                   tai_khoan: 'Tài khoản',
                   ho_ten: 'Họ tên',
                   vai_tro: 'Vai trò',
+                  active: 'Trạng thái',
                 }) as any
               )[k],
           ),
           'Thao tác',
         ]}
-        rows={(lists[kind] || []).map((r: Row) => [
+        rows={rows.map((r: Row) => [
           ...fields[kind].map((k) =>
-            k === 'online'
+            k === 'active' ? (r.active === false ? 'Đã khóa' : 'Hoạt động')
+              : k === 'so_tang' && kind === 'rooms' ? location(r).floor?.so_tang
+              : k === 'online'
               ? (r.online ? 'Online' : r.lastSeen ? 'Offline' : 'Chưa kết nối')
               : k === 'ma_phong'
               ? lists.rooms.find((room: Row) => room._id === r[k])?.ten_phong
               : k === 'ma_toa_nha'
-              ? lists.buildings.find((b: Row) => b._id === r[k])?.ten_toa_nha
+              ? lists.buildings.find((b: Row) => b._id === (r[k] || r.buildingId))?.ten_toa_nha
               : r[k],
           ),
           <div className="actions">
@@ -1711,15 +1705,18 @@ function CatalogPage({ lists, edit, run, setup }: any) {
             <button onClick={() => edit(kind, r)}>Sửa</button>
             <button
               className="danger"
-              onClick={() =>
-                confirm(
+              disabled={!!deleting || (kind === 'users' && r.active === false)}
+              onClick={async () => {
+                if (!confirm(
                   kind === 'users'
                     ? 'Khóa tài khoản này?'
                     : 'Xóa đối tượng này? Đối tượng có lịch sử sẽ không bị xóa.',
-                ) && run(kind + '/' + r._id, 'DELETE')
-              }
+                )) return;
+                setDeleting(r._id);
+                try { await run(kind + '/' + r._id, 'DELETE'); } finally { setDeleting(''); }
+              }}
             >
-              {kind === 'users' ? 'Khóa' : 'Xóa'}
+              {deleting === r._id ? 'Đang xử lý…' : kind === 'users' ? 'Khóa' : 'Xóa'}
             </button>
           </div>,
         ])}
@@ -1968,6 +1965,7 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
     setValidationError('');
     const payload: Row = {};
     for (const f of definitions[kind]) {
+      if (record && f.fixed) continue;
       if (f.type === 'time-window') {
         const start = form.khung_gio_bat_dau || '';
         const end = form.khung_gio_ket_thuc || '';
@@ -1982,7 +1980,13 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
         continue;
       }
       let v = form[f.key];
+      if (typeof v === 'string' && f.type !== 'password') v = v.trim();
+      if (!f.optional && !['checkbox', 'multiple', 'time-window'].includes(f.type || '') && (v === '' || v === undefined)) {
+        setValidationError('Vui lòng nhập ' + f.label.toLowerCase() + '.');
+        return;
+      }
       if (f.optional && (v === '' || v === undefined || v === null)) {
+        if (record && f.key === 'dia_chi') payload[f.key] = '';
         if (record && ['khung_gio_ap_dung', 'gia_tri_phuc_hoi'].includes(f.key)) payload[f.key] = null;
         continue;
       }
@@ -1997,6 +2001,7 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
     <div className="modal-backdrop">
       <section
         className="modal"
+        data-editor-kind={kind}
         role="dialog"
         aria-modal="true"
         aria-label={kindLabels[kind]}
@@ -2005,7 +2010,7 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
           <h2>
             {record ? 'Chỉnh sửa' : 'Thêm'} {kindLabels[kind].toLowerCase()}
           </h2>
-          <button aria-label="Đóng" onClick={close}>
+          <button aria-label="Đóng" disabled={busy} onClick={close}>
             ×
           </button>
         </div>
@@ -2110,7 +2115,7 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
             <div className="error">{validationError || error}</div>
           )}
           <div className="modal-actions">
-            <button type="button" onClick={close}>
+            <button type="button" disabled={busy} onClick={close}>
               Hủy
             </button>
             <button className="primary" disabled={busy}>

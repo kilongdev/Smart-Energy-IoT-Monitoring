@@ -64,15 +64,20 @@ export class Catalog {
             : { _id: { $in: user.buildingIds } }
           : this.security.buildingFilter(user);
 
-    for (const key of ['ma_toa_nha', 'ma_tang', 'ma_phong']) {
-      if (filter[key]) {
-        query[key] = filter[key];
-      }
+    const filters: any[] = [query];
+    if (kind !== 'users' && filter.ma_toa_nha) filters.push({
+      [kind === 'buildings' ? '_id' : 'buildingId']: filter.ma_toa_nha,
+    });
+    if (filter.ma_tang && kind === 'rooms') filters.push({ ma_tang: filter.ma_tang });
+    if (filter.ma_tang && kind === 'devices') {
+      const rooms = await this.db.collection('rooms').find({ ma_tang: filter.ma_tang }).toArray();
+      filters.push({ ma_phong: { $in: rooms.map(room => room._id) } });
     }
+    if (filter.ma_phong && kind === 'devices') filters.push({ ma_phong: filter.ma_phong });
 
     const rows = await this.db
       .collection(kind)
-      .find(query)
+      .find({ $and: filters })
       .sort({ createdAt: 1 })
       .limit(1000)
       .toArray();
@@ -198,9 +203,13 @@ export class Catalog {
       data.tokenVersion = (old.tokenVersion || 0) + 1;
     }
 
-    await this.db.collection(kind).replaceOne(
+    // Update only editable fields: telemetry/ACK may arrive while this form is saved.
+    const changes: any = Object.fromEntries(Object.keys(dto).map(key => [key, data[key]]));
+    changes.updatedAt = data.updatedAt;
+    if (kind === 'users') changes.tokenVersion = data.tokenVersion;
+    await this.db.collection(kind).updateOne(
       { _id: id },
-      data,
+      { $set: changes },
     );
 
     if (kind === 'users') {
@@ -235,6 +244,7 @@ export class Catalog {
         ['rules', 'ma_thiet_bi'],
         ['commands', 'ma_thiet_bi'],
         ['schedules', 'ma_thiet_bi'],
+        ['alerts', 'ma_thiet_bi'],
       ],
     };
 
@@ -253,6 +263,8 @@ export class Catalog {
 
       this.events.emit('revoke', id);
 
+      await this.db.audit('DISABLE_USER', { kind, id, actor: actor._id });
+
       return {
         message: 'Đã khóa tài khoản, giữ lại nhật ký',
       };
@@ -265,7 +277,7 @@ export class Catalog {
 
       if (reference) {
         throw new ConflictException(
-          'Đối tượng có dữ liệu liên quan, không thể xóa',
+          'Không thể xóa: còn ' + ({ floors: 'tầng', rooms: 'phòng', devices: 'thiết bị', telemetry: 'dữ liệu đo', hourly: 'thống kê điện năng', rules: 'quy tắc cảnh báo', commands: 'lịch sử điều khiển', schedules: 'lịch hẹn giờ', alerts: 'lịch sử cảnh báo' } as Record<string, string>)[collection] + ' liên quan. Hãy xử lý dữ liệu liên quan trước.',
         );
       }
     }
@@ -282,6 +294,12 @@ export class Catalog {
   }
 
   private async validate(kind: string, data: any) {
+    for (const key of ['ten_toa_nha', 'ten_phong', 'ten_thiet_bi', 'ho_ten']) {
+      if (typeof data[key] === 'string') {
+        data[key] = data[key].trim();
+        if (!data[key]) throw new BadRequestException('Tên không được chỉ chứa khoảng trắng');
+      }
+    }
     if (kind === 'floors') {
       await this.get('buildings', data.ma_toa_nha);
       data.buildingId = data.ma_toa_nha;
