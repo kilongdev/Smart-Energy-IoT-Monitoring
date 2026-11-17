@@ -1,7 +1,7 @@
 import { ControlPage } from './ControlPage';
 import { mergeAlertRecords, isAlertOpen } from './alert-records';
 import { createAlertRefresh } from './alert-refresh';
-import { updateLiveReading, preserveNewerReadings } from './live-readings';
+import { updateLiveReading, preserveNewerReadings, applyCommandOptimistic } from './live-readings';
 import { HeatPlan } from './HeatPlan';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -592,6 +592,7 @@ function App() {
     }
     setCommandPopup(command);
     if (command.trang_thai === 'Thành công') {
+      setData((previous) => applyCommandOptimistic(previous, command));
       setNoticeTone('success');
       setNotice(`Lệnh ${command.hanh_dong} đã thực hiện thành công`);
     } else if (command.trang_thai === 'Thất bại') {

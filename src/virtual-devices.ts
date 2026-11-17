@@ -226,6 +226,44 @@ export class VirtualDevices
     const mode = process.env.SIM_ACK_MODE || 'normal';
     state.relay = payload.hanh_dong === 'Bật';
 
+    // Gửi ngay 1 bản telemetry sau khi đổi relay để dashboard thấy công
+    // suất về 0 (Tắt) / có tải (Bật) trong ~0.5s thay vì chờ hết chu_ky_gui.
+    // Tick định kỳ vẫn giữ nguyên; reset state.last để không publish trùng.
+    try {
+      const now = Date.now();
+      const base = 420 + ((state.index * 53) % 480);
+      const power = state.relay
+        ? Math.round((base + Math.random() * 90) * 10) / 10
+        : 0;
+      const voltage = Math.round((219 + Math.random() * 3) * 10) / 10;
+      const current =
+        Math.round(((power / (voltage * 0.95) || 0) * 100)) / 100;
+      const temperature =
+        Math.round((state.relay ? 31 + (state.index % 5) : 27) + Math.random() * 10) / 10;
+      const leak = Math.round((3 + Math.random() * 6) * 10) / 10;
+      state.energy += (power * 0.5) / 3_600_000;
+      this.client?.publish(
+        `${state.topic}/telemetry`,
+        JSON.stringify({
+          ma_thiet_bi: state.id,
+          ma_phong: state.roomCode,
+          thoi_gian_do: new Date(now).toISOString(),
+          uptime_s: Math.floor((now - this.startedAt) / 1000),
+          cong_suat_w: power,
+          dien_ap_v: voltage,
+          dong_dien_a: current,
+          nhiet_do_c: temperature,
+          dong_ro_ma: leak,
+          dien_nang_kwh: Math.round(state.energy * 10000) / 10000,
+          trang_thai_relay: state.relay,
+          dinh_muc_w: state.dinhMuc,
+          che_do_gia_lap: 'binh_thuong',
+        }),
+        { qos: 1 },
+      );
+      state.last = now;
+    } catch {}
+
     if (mode === 'drop') return;
 
     const ack = {

@@ -270,6 +270,38 @@ export class Control
 
     // Duplicate ACKs must not overwrite telemetry or produce another popup.
     if (!completed) return;
+    // Tắt thành công: hạ công suất trong devices.latest ngay tại DB để
+    // mọi lần load() dashboard sau đó thấy 0 tức thì, không chờ telemetry
+    // kỳ sau (vốn còn kẹt sau hàng đợi ingest ~30s). Telemetry thật kỳ sau
+    // có thoi_gian_do mới hơn vẫn ghi đè bình thường qua Telemetry.process.
+    const relayOffSuccess =
+      completed.trang_thai === 'Thành công' &&
+      command.hanh_dong === 'Tắt' &&
+      dto.trang_thai_relay === false;
+    // Bật thành công: công suất thật còn kẹt sau hàng đợi ingest ~30s nên
+    // DB vẫn giữ số 0 cũ tới 10s+. Lấy mẫu dương gần nhất làm ước lượng để
+    // dashboard thấy tải ngay; telemetry thật kỳ sau ghi đè lại.
+    const relayOnSuccess =
+      completed.trang_thai === 'Thành công' &&
+      command.hanh_dong === 'Bật' &&
+      dto.trang_thai_relay === true;
+    let powerEstimate: any = null;
+    if (relayOnSuccess) {
+      // Không query telemetry ở đây: collection telemetry giữ 30 ngày và
+      // chưa có index theo ma_thiet_bi nên find().sort() quét rất lâu
+      // (tới hàng chục giây), làm chậm chính ACK đang cần trả nhanh.
+      // Dùng ước lượng tức thì từ công suất định mức; telemetry thật
+      // kỳ sau (thiết bị ảo đã publish ngay khi đổi relay) sẽ ghi đè
+      // lại số chính xác.
+      const rated = Number(device.cong_suat_dinh_muc) || 2000;
+      const guess = Math.round(Math.min(900, Math.max(300, rated * 0.25)) * 10) / 10;
+      powerEstimate = {
+        cong_suat_w: guess,
+        dong_dien_a: Math.round(((guess / 220) * 100)) / 100,
+        dien_ap_v: 220,
+      };
+      (completed as any).powerEstimate = powerEstimate;
+    }
     // Old ACK cannot overwrite the state of a more recently requested command or measurement.
     await this.db.collection('devices').updateOne(
       {
@@ -285,6 +317,29 @@ export class Control
           trang_thai_relay: dto.trang_thai_relay,
           lastRelayAt: stateTime,
           lastSeen: now,
+          // Chặn telemetry cũ còn kẹt trong hàng đợi ingest (~30s+) ghi đè
+          // ước lượng mới: nâng mốc thời gian latest lên lúc ACK để các bản
+          // tin đo trước đó bị coi là cũ và bỏ qua. Telemetry kỳ sau có
+          // thoi_gian_do mới hơn vẫn ghi đè bình thường.
+          ...(relayOffSuccess || powerEstimate
+            ? {
+                'latest.thoi_gian_do': now,
+                'latest.receivedAt': now,
+              }
+            : {}),
+          ...(relayOffSuccess
+            ? {
+                'latest.cong_suat_w': 0,
+                'latest.dong_dien_a': 0,
+              }
+            : {}),
+          ...(powerEstimate
+            ? {
+                'latest.cong_suat_w': powerEstimate.cong_suat_w,
+                'latest.dong_dien_a': powerEstimate.dong_dien_a,
+                'latest.dien_ap_v': powerEstimate.dien_ap_v,
+              }
+            : {}),
         },
       },
     );
