@@ -1,3 +1,4 @@
+import { ControlPage } from './ControlPage';
 import { HeatPlan } from './HeatPlan';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -39,6 +40,8 @@ function Icon({ name }: { name: string }) {
     alert: 'm12 3 10 18H2z M12 9v5 M12 17v1',
     bell: 'M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9 M10 21h4',
     control: 'M12 2v10 M6 5a9 9 0 1 0 12 0',
+    clock: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M12 7v5l3 2',
+    info: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M12 11v6 M12 7v.1',
     schedule: 'M8 2v4 M16 2v4 M3 10h18 M3 4h18v17H3z M8 14h3 M8 17h6',
     catalog: 'M3 7h18v14H3z M3 7l3-4h12l3 4 M8 12h8',
     logs: 'M5 3h14v18H5z M8 8h8 M8 12h8 M8 16h5',
@@ -338,6 +341,7 @@ function App() {
     [schedules, setSchedules] = useState<Row[]>([]),
     [logs, setLogs] = useState<Row[]>([]);
   const [activeAlerts, setActiveAlerts] = useState<Row[]>([]);
+  const [deviceLoadError, setDeviceLoadError] = useState('');
   const [alertsReady, setAlertsReady] = useState(false);
   const [alertsLoadError, setAlertsLoadError] = useState('');
   const [deviceSetup, setDeviceSetup] = useState<Row | null>(null);
@@ -421,6 +425,7 @@ function App() {
         api('alerts/active'),
         ...names.map((x) => api(x)),
       ]);
+      setDeviceLoadError('');
       setData(dash);
       setActiveAlerts(active);
       setLists(Object.fromEntries(names.map((n, i) => [n, values[i]])));
@@ -444,6 +449,7 @@ function App() {
     } catch (e: any) {
       setError(e.message);
       setAlertsLoadError(e.message);
+      setDeviceLoadError(e.message);
     }
   }, [user, admin, manager]);
   useEffect(() => {
@@ -1134,86 +1140,7 @@ function App() {
           </div>
         )}
         {tab === 'map' && <HeatPlan rooms={data.heatmap.filter((r: Row) => inScope(r))} floors={lists.floors || []} buildings={lists.buildings || []} devices={data.devices} alerts={activeAlerts} />}
-        {tab === 'control' && (
-          <>
-            <p className="info-text">
-              Lệnh chuyển sang “Thành công” sau khi thiết bị xác nhận. Nếu quá 10
-              giây chưa có ACK, kết quả là “Chưa xác định”; ACK đến muộn sẽ cập nhật
-              lại kết quả theo phản hồi thiết bị.
-            </p>
-            <div className="device-grid">
-              {visibleDevices.map((d: Row) => (
-                <section className="panel device" key={d._id}>
-                  <div className="panel-head">
-                    <span className="device-icon">
-                      <Icon name="control" />
-                    </span>
-                    <Badge value={d.online} />
-                  </div>
-                  <h2>
-                    Gateway ·{' '}
-                    {lists.rooms?.find((r: Row) => r._id === d.ma_phong)
-                      ?.ten_phong || d.ten_thiet_bi}
-                  </h2>
-                  <p className="muted">
-                    {
-                      lists.rooms?.find((r: Row) => r._id === d.ma_phong)
-                        ?.ten_phong
-                    }
-                  </p>
-                  <div className="device-power">
-                    {fmt(d.latest?.cong_suat_w)} <small>W</small>
-                  </div>
-                  <div className="device-state">
-                    Relay báo về:{' '}
-                    <strong>
-                      {d.trang_thai_relay === undefined
-                        ? 'Chưa có'
-                        : d.trang_thai_relay
-                          ? 'Bật'
-                          : 'Tắt'}
-                    </strong>
-                  </div>
-                  {d.pendingCommand ? (
-                    <p className="pending">Đang chờ phản hồi thiết bị…</p>
-                  ) : (
-                    <div className="button-row">
-                      <button
-                        disabled={!d.online || !d.cho_phep_dieu_khien || saving}
-                        onClick={() =>
-                          run(
-                            `control/devices/${d._id}/switch`,
-                            'POST',
-                            { hanh_dong: 'Bật' },
-                            'Đã tạo lệnh Bật; đang chờ ACK',
-                          )
-                        }
-                      >
-                        Bật
-                      </button>
-                      <button
-                        disabled={!d.online || !d.cho_phep_dieu_khien || saving}
-                        onClick={() =>
-                          run(
-                            `control/devices/${d._id}/switch`,
-                            'POST',
-                            { hanh_dong: 'Tắt' },
-                            'Đã tạo lệnh Tắt; đang chờ ACK',
-                          )
-                        }
-                      >
-                        Tắt
-                      </button>
-                    </div>
-                  )}
-                </section>
-              ))}
-            </div>
-            {!visibleDevices.length && (
-              <Empty text="Chưa có thiết bị trong phạm vi này" />
-            )}
-          </>
-        )}
+        {tab === 'control' && <ControlPage key={scopeFloor} devices={visibleDevices} rooms={lists.rooms || []} commands={logs} popup={commandPopup} connected={connected} loading={!data.serverTime} error={deviceLoadError} retry={load} saving={saving} run={run} Chart={Chart} Icon={Icon} Metric={Metric} />}
         {tab === 'alert' && (
           <AlertPage
             activeAlerts={activeAlerts.filter(inScope)}
@@ -1232,9 +1159,11 @@ function App() {
           />
         )}
         {tab === 'schedule' && (
-          <section className="panel">
+          <section className="panel management-page schedule-page">
             <div className="panel-head">
+              <span className="management-icon" aria-hidden="true"><Icon name="schedule" /></span>
               <div>
+                <p className="management-eyebrow">TỰ ĐỘNG HÓA</p>
                 <h2>Lịch điều khiển</h2>
                 <p className="muted small">
                   Mỗi lịch thực hiện một hành động · Múi giờ Asia/Ho_Chi_Minh
@@ -1244,6 +1173,7 @@ function App() {
                 + Thêm lịch
               </button>
             </div>
+            <div className="management-context"><span className="inline-ui-icon" aria-hidden="true"><Icon name="clock" /></span><span>Lịch lặp theo giờ Việt Nam. Mỗi dòng là một hành động đã cấu hình.</span></div>
             <Table
               heads={[
                 'Thiết bị',
@@ -1258,9 +1188,9 @@ function App() {
                 .map((s) => [
                   data.devices.find((d: Row) => d._id === s.ma_thiet_bi)
                     ?.ten_thiet_bi,
-                  s.hanh_dong,
-                  s.gio_bat_dau,
-                  s.ngay_lap_lai,
+                  <span className="management-action"><span className="inline-ui-icon" aria-hidden="true"><Icon name="control" /></span> {s.hanh_dong}</span>,
+                  <span className="schedule-clock">{s.gio_bat_dau}</span>,
+                  <span className="schedule-days">{s.ngay_lap_lai}</span>,
                   <Badge value={s.bat ? 'Đang bật' : 'Đang tắt'} />,
                   <div className="actions">
                     <button onClick={() => edit('schedules', s)}>Sửa</button>
@@ -1288,15 +1218,18 @@ function App() {
           </section>
         )}
         {tab === 'logs' && (
-          <section className="panel">
+          <section className="panel management-page history-page">
             <div className="panel-head">
+              <span className="management-icon" aria-hidden="true"><Icon name="logs" /></span>
               <div>
+                <p className="management-eyebrow">LỊCH SỬ VẬN HÀNH</p>
                 <h2>Nhật ký lệnh</h2>
                 <p className="muted small">
                   Tối đa 500 lệnh gần nhất · Trạng thái lấy từ phản hồi thiết bị
                 </p>
               </div>
             </div>
+            <div className="management-context"><span className="inline-ui-icon" aria-hidden="true"><Icon name="info" /></span><span>Kết quả lệnh được giữ nguyên theo hệ thống. Thông tin ACK và lỗi hiển thị tại cột Chi tiết.</span></div>
             <Table
               heads={[
                 'Thời điểm',
@@ -1309,11 +1242,11 @@ function App() {
               rows={logs
                 .filter((l) => inScope(l))
                 .map((l) => [
-                  date(l.thoi_gian_thuc_hien),
+                  <span className="history-time">{date(l.thoi_gian_thuc_hien)}</span>,
                   data.devices.find((d: Row) => d._id === l.ma_thiet_bi)
                     ?.ten_thiet_bi || l.ma_thiet_bi,
-                  l.hanh_dong,
-                  l.nguon,
+                  <span className="management-action"><span className="inline-ui-icon" aria-hidden="true"><Icon name="control" /></span> {l.hanh_dong}</span>,
+                  <span className="history-source">{l.nguon}</span>,
                   <Badge value={l.trang_thai} />,
                   l.loi ||
                     (l.lateAck
@@ -1456,10 +1389,10 @@ function AlertPage({
   return (
     <div className="alerts-page">
       <div className={'metrics alerts-kpis' + (loading ? ' loading-metrics' : '')} aria-busy={loading}>
-        <Metric label="◉ CẢNH BÁO ĐANG HOẠT ĐỘNG" value={loading || loadError ? '—' : open.length} detail="Sự cố chưa phục hồi trong phạm vi" featured />
+        <Metric label="CẢNH BÁO ĐANG HOẠT ĐỘNG" value={loading || loadError ? '—' : open.length} detail="Sự cố chưa phục hồi trong phạm vi" featured />
         <Metric label="⚠ CẢNH BÁO NGHIÊM TRỌNG" value={loading || loadError ? '—' : open.filter(a => a.muc_do === 'HIGH').length} detail="Mức cao · Critical đang hoạt động" danger={open.some(a => a.muc_do === 'HIGH')} />
         <Metric label="✓ ĐÃ PHỤC HỒI" value={loading || loadError ? '—' : recovered.length} detail={since ? 'Phục hồi từ ngày đã chọn · trong lịch sử đã tải' : 'Trong lịch sử đã tải'} />
-        <Metric label="⌁ THIẾT BỊ CÓ CẢNH BÁO" value={loading || loadError ? '—' : new Set(open.map(a => a.ma_thiet_bi)).size} detail="Thiết bị có ít nhất một sự cố đang hoạt động" />
+        <Metric label="THIẾT BỊ CÓ CẢNH BÁO" value={loading || loadError ? '—' : new Set(open.map(a => a.ma_thiet_bi)).size} detail="Thiết bị có ít nhất một sự cố đang hoạt động" />
       </div>
       <section className="panel">
         <div className="panel-head">
@@ -1692,12 +1625,14 @@ function CatalogPage({ lists, edit, run, setup, building, scopeFloor, inScope }:
     users: ['tai_khoan', 'ho_ten', 'vai_tro', 'active'],
   };
   return (
-    <section className="panel">
+    <section className="panel management-page administration-page">
+      <div className="administration-heading"><span className="management-icon" aria-hidden="true"><Icon name="catalog" /></span><div><p className="management-eyebrow">CẤU TRÚC HỆ THỐNG</p><h2>Quản lý danh mục</h2><p className="muted small">Tòa nhà → Tầng → Phòng → Thiết bị</p></div></div>
       <div className="panel-head">
-        <div className="tabs">
+        <div className="tabs" aria-label="Danh mục quản trị">
           {Object.keys(fields).map((k) => (
             <button
               className={kind === k ? 'selected' : ''}
+              aria-pressed={kind === k}
               onClick={() => setKind(k)}
               key={k}
             >
@@ -1709,6 +1644,7 @@ function CatalogPage({ lists, edit, run, setup, building, scopeFloor, inScope }:
           + Thêm {kindLabels[kind].toLowerCase()}
         </button>
       </div>
+      <div className="administration-caption"><h3>{kindLabels[kind]}</h3><span>Danh sách theo phạm vi giám sát đang chọn</span></div>
       <Table
         heads={[
           ...fields[kind].map(
@@ -2048,6 +1984,7 @@ function Editor({ kind, record, lists, busy, error, close, save }: any) {
     <div className="modal-backdrop">
       <section
         className="modal"
+        data-editor-kind={kind}
         role="dialog"
         aria-modal="true"
         aria-label={kindLabels[kind]}
