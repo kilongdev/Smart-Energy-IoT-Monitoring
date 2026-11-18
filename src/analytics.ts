@@ -112,7 +112,7 @@ export class Analytics implements OnApplicationBootstrap, OnModuleDestroy {
               $gte: new Date(start - gap),
               $lte: new Date(end + gap),
             },
-          })
+          }, { projection: { _id: 0, thoi_gian_do: 1, cong_suat_w: 1 } })
           .sort({ thoi_gian_do: 1 })
           .toArray();
 

@@ -5,6 +5,41 @@ import { Alerts } from '../src/alerts';
 import { MemoryStore } from './memory-store';
 
 afterEach(() => mock.restoreAll());
+test('Socket events carry persisted readings and recovery without a history refetch', async () => {
+  const f=await setup({thoi_gian_phuc_hoi:5});
+  await f.measure(0,250);
+  const event=()=>f.events.at(-1);
+  assert.equal(event()[1],'alert'); assert.equal(event()[3],true);
+  assert.equal(event()[2].record.measurementState,'ACTIVE');
+  await f.measure(1,260);
+  assert.equal(event()[2].record.snapshot.sample.dien_ap_v,260);
+  assert.equal(event()[2].notify,false);
+  await f.measure(2,220);
+  assert.equal(event()[2].record.measurementState,'RECOVERING');
+  assert.equal(event()[2].notify,true);
+  await f.measure(7,220);
+  assert.equal(event()[2].record.measurementState,'RECOVERED');
+  assert.equal(event()[2].record.isOpen,false);
+  assert.deepEqual(event()[2].record,await f.alert());
+});
+test('Three repeated incidents recover and reopen without restarting the engine', async () => {
+  const f = await setup({ thoi_gian_phuc_hoi: 5 });
+  const ids = new Set<string>();
+  for (let cycle = 0; cycle < 3; cycle++) {
+    const t = cycle * 20;
+    await f.measure(t, 250);
+    const active = await f.db.collection('alerts').findOne({ isOpen: true });
+    assert.equal(active.measurementState, 'ACTIVE'); ids.add(active._id);
+    await f.measure(t + 2, 220);
+    assert.equal((await f.db.collection('alerts').findOne({_id:active._id})).measurementState, 'RECOVERING');
+    await f.measure(t + 3, 250);
+    assert.equal((await f.db.collection('alerts').findOne({_id:active._id})).measurementState, 'ACTIVE');
+    await f.measure(t + 5, 220); await f.measure(t + 10, 220);
+    assert.equal((await f.db.collection('alerts').findOne({_id:active._id})).measurementState, 'RECOVERED');
+    assert.equal(await f.db.collection('alerts').countDocuments({isOpen:true}), 0);
+  }
+  assert.equal(ids.size, 3);
+});
 test('Detection sample is immutable while latest evaluated sample changes', async () => {
   const f = await setup();
   await f.measure(0, 250); await f.measure(5, 260);
@@ -114,7 +149,7 @@ test('A spike during recovery resets recovery without creating another incident'
   const f = await setup();
   await f.measure(0, 250);
   await f.measure(5); await f.measure(15); await f.measure(25, 250);
-  assert.equal(f.events.filter(event => event[1] === 'alert').length, 3,
+  assert.equal(f.events.filter(event => event[1] === 'alert' && event[2].notify !== false).length, 3,
     'detection, start recovery and return to ACTIVE must each notify clients');
   assert.equal((await f.alert()).recoverySince, null);
   assert.equal((await f.alert()).tinh_trang, 'Đang diễn ra');

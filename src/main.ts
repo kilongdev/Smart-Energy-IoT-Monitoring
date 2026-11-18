@@ -1,8 +1,10 @@
 import 'reflect-metadata';
 
 import { createApp } from './app';
+import { assertLocalPortAvailable } from './startup-check';
 
-createApp()
+assertLocalPortAvailable(Number(process.env.PORT || 3000))
+  .then(() => createApp())
   .then((app) =>
     app.listen(
       Number(process.env.PORT || 3000),

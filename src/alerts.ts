@@ -17,6 +17,17 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
   private checkingRecovery = false;
   private readonly lastStaleWarning = new Map<string, number>();
   private readonly log = new Logger(Alerts.name);
+  private readonly publishing = new Map<string, Promise<void>>();
+  private publishAlert(id: string, message?: string, notify = true) {
+    // Serialize snapshots per incident so delivery updates cannot overtake recovery.
+    const work = (this.publishing.get(id) || Promise.resolve()).catch(() => {}).then(async () => {
+      const record = await this.db.collection('alerts').findOne({ _id: id });
+      if (record) this.events.send(record.buildingId, 'alert', { id, message, record, notify }, true);
+    });
+    this.publishing.set(id, work);
+    void work.finally(() => { if (this.publishing.get(id) === work) this.publishing.delete(id); }).catch(() => {});
+    return work;
+  }
   constructor(
     private readonly db: Database, private readonly events: Events,
     private readonly catalog: Catalog, private readonly security: Security,
@@ -37,7 +48,7 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
         measurementState: 'ACTIVE', tinh_trang: 'Đang diễn ra', recoverySince: null,
         recoveryStartedAt: null, recoveryInterruptedReason: reason,
       } });
-      if (result.modifiedCount) this.events.send(row.buildingId, 'alert', { id: row._id }, true);
+      if (result.modifiedCount) await this.publishAlert(row._id);
     }
   }
   async expireRecoveries() {
@@ -106,6 +117,11 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
       }
       return;
     }
+    // Query current configuration rather than caching "no rules" for 60 seconds.
+    // Devices without rules do not contend for evaluation leases.
+    if (!await this.db.collection('rules').findOne(
+      { ma_thiet_bi: device._id, bat: true }, { projection: { _id: 1 } },
+    )) return;
     // Persist the per-device mutex so separate API workers serialize evaluation.
     const locks = this.db.collection('alert_evaluation_locks');
     try {
@@ -166,7 +182,7 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
         if (alert) await alerts.updateOne({ _id: alert._id }, { $set: {
           recoverySince: null, recoveryStartedAt: null, measurementState: 'ACTIVE', tinh_trang: 'Đang diễn ra', trang_thai: 'Đang theo dõi',
         } });
-        if (alert?.measurementState === 'RECOVERING') this.events.send(device.buildingId, 'alert', { id: alert._id }, true);
+        if (alert?.measurementState === 'RECOVERING') await this.publishAlert(alert._id);
         return;
       }
       const continuous = Boolean(rule.lastSample && rule.lastMeasured &&
@@ -179,6 +195,14 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
       const normal = inRecoveryRange(value, effective) && bounds.every(r => inRecoveryRange(value, r));
       const start = withinWindow && violation ? (continuous && rule.start ? rule.start : received) : null;
       let measurementState = alert ? (normal ? 'RECOVERING' : 'ACTIVE') : start ? 'PENDING' : 'NORMAL';
+      if (!alert && (!start || +received - +start < rule.thoi_gian_duy_tri * 1000)) {
+        // No incident transition: persist the rule cursor in one write instead
+        // of writing start and then the same cursor in a second round trip.
+        await this.db.collection('rules').updateOne({ _id: rule._id, updatedAt: rule.updatedAt }, {
+          $set: { start, lastSample: received, lastMeasured: measured, lastValidSampleAt: measured, measurementState },
+        });
+        return;
+      }
       const updated = await this.db.collection('rules').updateOne(
         { _id: rule._id, updatedAt: rule.updatedAt },
         { $set: { start } },
@@ -212,9 +236,7 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
           );
           realtimeTrace('alert.persisted', { alertId: alert._id, state: 'RECOVERED', changed: closed.modifiedCount,
             receivedAt: received, measuredAt: measured });
-          if (closed.modifiedCount) this.events.send(device.buildingId, 'alert', {
-            id: alert._id, message: device.ten_thiet_bi + ': Thông số đã phục hồi theo quy tắc giám sát',
-          }, true);
+          if (closed.modifiedCount) await this.publishAlert(alert._id, device.ten_thiet_bi + ': Thông số đã phục hồi theo quy tắc giám sát');
           measurementState = 'NORMAL';
           return;
         }
@@ -228,9 +250,8 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
         realtimeTrace('alert.persisted', { alertId: alert._id, state: normal ? 'RECOVERING' : 'ACTIVE',
           receivedAt: received, measuredAt: measured });
         // Notify both directions, including a renewed violation during recovery.
-        if (alert.measurementState !== (normal ? 'RECOVERING' : 'ACTIVE')) {
-          this.events.send(device.buildingId, 'alert', { id: alert._id }, true);
-        }
+        await this.publishAlert(alert._id, undefined,
+          alert.measurementState !== (normal ? 'RECOVERING' : 'ACTIVE'));
         if (normal || !withinWindow) {
           return;
         }
@@ -263,7 +284,7 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
         catch (error: any) { if (error.code === 11000) return; throw error; }
         realtimeTrace('alert.persisted', { alertId: alert._id, state: 'ACTIVE', receivedAt: received, measuredAt: measured });
         measurementState = 'ACTIVE';
-        this.events.send(device.buildingId, 'alert', { id: alert._id, message: alert.noi_dung_loi }, true);
+        await this.publishAlert(alert._id, alert.noi_dung_loi);
       }
       const now = new Date();
       const cooldown = Math.max(Number(rule.cooldown) || 300, 300);
@@ -417,7 +438,7 @@ export class Alerts implements OnApplicationBootstrap, OnModuleDestroy {
             $inc: { [prefix + 'attempts']: 1 },
             $push: { deliveryLog: { at: now, state, error, messageId, kind: delivery.notificationKind || 'detected' } },
           } as any);
-          this.events.send(alert.buildingId, 'alert', { id: alert._id }, true);
+          await this.publishAlert(alert._id, undefined, false);
           return;
         }
       }

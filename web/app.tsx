@@ -1,6 +1,8 @@
 import { ControlPage } from './ControlPage';
 import { mergeAlertRecords, isAlertOpen } from './alert-records';
 import { createAlertRefresh } from './alert-refresh';
+import { readAuthToken, saveAuthToken, clearAuthToken } from './auth-storage';
+import { createAlertLiveOverlay, upsertLiveAlert } from './alert-live';
 import { updateLiveReading, preserveNewerReadings, applyCommandOptimistic } from './live-readings';
 import { HeatPlan } from './HeatPlan';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
@@ -18,7 +20,7 @@ const date = (v: any) =>
   v
     ? new Date(v).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })
     : 'Chưa có';
-const getToken = () => sessionStorage.getItem('energy-token');
+const getToken = () => readAuthToken(sessionStorage, localStorage);
 async function api(path: string, method = 'GET', data?: any, signal?: AbortSignal) {
   const r = await fetch('/api/v1/' + path, {
     method,
@@ -218,6 +220,7 @@ function formatAlertCondition(rule: Row) {
   return `${metric} (${unit}) ${operator} ${fmt(rule.gia_tri_nguong)} ${unit}`.trim();
 }
 function Login({ done }: { done: (u: Row) => void }) {
+  const [remember, setRemember] = useState(false);
   const [name, setName] = useState('admin'),
     [password, setPassword] = useState(''),
     [error, setError] = useState(''),
@@ -231,7 +234,7 @@ function Login({ done }: { done: (u: Row) => void }) {
         tai_khoan: name,
         mat_khau: password,
       });
-      sessionStorage.setItem('energy-token', r.access_token);
+      saveAuthToken(r.access_token, remember, sessionStorage, localStorage);
       done(r.user);
     } catch (e: any) {
       setError(e.message);
@@ -279,6 +282,7 @@ function Login({ done }: { done: (u: Row) => void }) {
               onChange={(e) => setName(e.target.value)}
               required
               autoComplete="username"
+              name="username"
             />
           </label>
           <label>
@@ -289,8 +293,14 @@ function Login({ done }: { done: (u: Row) => void }) {
               onChange={(e) => setPassword(e.target.value)}
               required
               autoComplete="current-password"
+              name="password"
             />
           </label>
+          <label className="remember-login">
+            <input type="checkbox" checked={remember} onChange={e => setRemember(e.target.checked)} />
+            Ghi nhớ đăng nhập trên thiết bị này
+          </label>
+          <small className="muted">Giữ phiên đăng nhập tối đa 8 giờ. Bạn có thể lưu mật khẩu bằng trình quản lý mật khẩu của trình duyệt.</small>
           {error && <div className="error">{error}</div>}
           <button className="primary wide" disabled={busy}>
             {busy ? 'Đang đăng nhập…' : 'Đăng nhập →'}
@@ -353,6 +363,8 @@ function App() {
   const [alertsLoadError, setAlertsLoadError] = useState('');
   const [deviceSetup, setDeviceSetup] = useState<Row | null>(null);
   const bellRef = useRef<HTMLDivElement>(null);
+  const previousAlertIds = useRef<Set<string> | null>(null);
+  const [bellSignal, setBellSignal] = useState(0);
 
   const [notice, setNotice] = useState(''),
     [noticeTone, setNoticeTone] = useState<'success' | 'error'>('success'),
@@ -396,7 +408,9 @@ function App() {
     commandResults.current.clear();
   }, [user]);
   const logout = useCallback(() => {
-    sessionStorage.removeItem('energy-token');
+    clearAuthToken(sessionStorage, localStorage);
+    previousAlertIds.current = null;
+    setBellSignal(0);
     setCommandPopup(null);
     setDeviceSetup(null);
     setBellOpen(false);
@@ -418,21 +432,26 @@ function App() {
     return () => window.removeEventListener('energy-logout', logout);
   }, []);
   const alertRefresh = useRef<ReturnType<typeof createAlertRefresh> | null>(null);
+  const alertLive = useRef(createAlertLiveOverlay());
   useEffect(() => {
     if (!user) return;
+    const live = createAlertLiveOverlay();
+    alertLive.current = live;
     const refresh = createAlertRefresh(async () => {
+      live.beginRead();
       traceAlerts('alerts.fetch.start');
-      const active = await api('alerts/active');
+      const [active, history] = await Promise.all([
+        api('alerts/active'), manager ? api('alerts/history') : Promise.resolve(null),
+      ]);
       if (!manager) return { active, history: null };
-      const history = await api('alerts/history');
       const linkedId = new URLSearchParams(location.search).get('alert');
       const linked = linkedId && !history.some((item: Row) => item._id === linkedId)
         ? await api('alerts/history?id=' + encodeURIComponent(linkedId)) : [];
       return { active, history: [...history, ...linked] };
     }, result => {
       traceAlerts('alerts.state.commit', { openIds: result.active.map((row: Row) => row._id) });
-      setActiveAlerts(result.active);
-      if (result.history) setAlerts(result.history);
+      setActiveAlerts(live.reconcile(result.active, true));
+      if (result.history) setAlerts(live.reconcile(result.history));
       setAlertsReady(true);
       setAlertsLoadError('');
     }, error => setAlertsLoadError(error instanceof Error ? error.message : 'Không tải được cảnh báo'));
@@ -488,16 +507,7 @@ function App() {
     });
     socket.on('connect', () => { setConnected(true); void alertRefresh.current?.request(); });
     socket.on('disconnect', () => setConnected(false));
-    // Telemetry về 7-8 bản/s khi bật 15 máy ảo: chỉ vẽ số live, không
-    // reload full dashboard mỗi bản (trước đây mỗi telemetry kéo theo
-    // dashboard + buildings/floors/rooms/devices + rules/schedules/logs,
-    // tự DDoS Atlas free-tier và làm chậm đường ACK của Wokwi).
-    // Reload nền 5s/lần là đủ cho aggregates; lệnh Bật/Tắt vẫn reload
-    // nhanh 250ms qua updateSoon bên dưới.
-    const update = () => {
-      if (refreshTimer.current) return;
-      refreshTimer.current = setTimeout(() => { refreshTimer.current = null; load(); }, 5000);
-    };
+    // Live telemetry updates state; periodic load refreshes aggregates.
     const updateSoon = () => {
       if (refreshTimer.current) {
         clearTimeout(refreshTimer.current);
@@ -509,7 +519,6 @@ function App() {
       // The backend has already processed this reading. Display it immediately;
       // the throttled reload updates aggregates without starving under traffic.
       setData(previous => updateLiveReading(previous, sample));
-      update();
     });
     socket.on('command', (command: any) => {
       showCommandResult(command);
@@ -517,9 +526,18 @@ function App() {
     });
     socket.on('alert', (e: any) => {
       traceAlerts('socket.received', { alertId: e.id });
+      if (e.record?._id === e.id && typeof e.record.isOpen === 'boolean' && manager) {
+        alertLive.current.accept(e.record);
+        setAlerts(rows => upsertLiveAlert(rows, e.record));
+        setActiveAlerts(rows => upsertLiveAlert(rows, e.record, true));
+        // Full initial history still comes from HTTP; a single event is not a
+        // successful load of the whole page.
+      } else {
+        void alertRefresh.current?.request();
+      }
+      if (e.notify === false) return;
       setNoticeTone('success');
       setNotice(e.message || 'Trạng thái cảnh báo đã cập nhật');
-      void alertRefresh.current?.request();
     });
     return () => {
       clearInterval(timer);
@@ -534,6 +552,17 @@ function App() {
     const roomId = r.ma_phong || lists.devices?.find((d: Row) => d._id === r.ma_thiet_bi)?.ma_phong;
     return r.ma_tang === scopeFloor || lists.rooms?.some((room: Row) => room._id === roomId && room.ma_tang === scopeFloor);
   };
+  useEffect(() => {
+    if (!user || !alertsReady) return;
+    const previous = previousAlertIds.current;
+    previousAlertIds.current = new Set(activeAlerts.map(row => row._id));
+    // Initial history is not a new notification; updates to the same incident
+    // (measurements or Telegram delivery) must not keep reopening the menu.
+    if (previous && activeAlerts.some(row => !previous.has(row._id) && inScope(row))) {
+      setBellSignal(value => value + 1);
+      setBellOpen(true);
+    }
+  }, [activeAlerts, alertsReady, user, scopeFloor, lists]);
   const visibleDevices = data.devices.filter(
     (d: Row) => inScope(d),
   );
@@ -820,19 +849,22 @@ function App() {
             </a>
             <div className="notification-wrap" ref={bellRef}>
               <button
-                className="notification-button"
+                className={'notification-button' + (notificationCount ? ' has-alerts' : '')}
                 aria-label={`Cảnh báo đang diễn ra: ${notificationCount}`}
                 aria-expanded={bellOpen}
                 aria-controls="active-alert-notifications"
                 onClick={() => setBellOpen((open) => !open)}
               >
-                <Icon name="bell" />
+                <span key={bellSignal} className={bellSignal && notificationCount ? 'bell-ring' : ''} aria-hidden="true"><Icon name="bell" /></span>
                 {notificationCount > 0 && (
                   <span className="notification-count">
                     {notificationCount > 9 ? '9+' : notificationCount}
                   </span>
                 )}
               </button>
+              <span className="bell-announcement" role="status" aria-live="polite">
+                {bellSignal > 0 && notificationCount > 0 ? `Có cảnh báo mới. ${notificationCount} cảnh báo đang diễn ra trong phạm vi giám sát.` : ''}
+              </span>
               {bellOpen && (
                 <section id="active-alert-notifications" className="notification-menu" aria-label="Cảnh báo đang diễn ra">
                   <div className="notification-head">
