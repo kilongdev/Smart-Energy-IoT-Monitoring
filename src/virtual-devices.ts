@@ -24,6 +24,9 @@ type VirtualState = {
   energy: number;
   index: number;
   acks: Map<string, any>;
+  observeUntil: number;
+  blocked: boolean;
+  published: Set<string>;
   // Giữ giá trị mượt giữa các kỳ để công suất không nhảy loạn.
   power: number;
   voltage: number;
@@ -157,6 +160,7 @@ export class VirtualDevices
       username: process.env.MQTT_USERNAME,
       password: process.env.MQTT_PASSWORD,
       clean: true,
+      queueQoSZero: false,
       reconnectPeriod: 2000,
       connectTimeout: 5000,
     });
@@ -167,6 +171,7 @@ export class VirtualDevices
       // campus/devices/*; handler sẽ lọc theo danh sách mô phỏng.
       this.client!.subscribe('campus/devices/+/command', { qos: 1 });
       this.client!.subscribe('campus/devices/+/config', { qos: 1 });
+      this.client!.subscribe('campus/#', { qos: 0 });
       this.log.log(
         `Giả lập ${this.devices.size} gateway (trừ A101/B101 thật).`,
       );
@@ -176,18 +181,19 @@ export class VirtualDevices
       this.log.warn('Virtual MQTT: ' + error.message);
     });
 
-    this.client.on('message', (topic, bytes) => {
+    this.client.on('message', (topic, bytes, packet) => {
       try {
+        if (topic.endsWith('/telemetry') && packet.retain) return;
         this.handle(topic, bytes);
       } catch (error: any) {
         this.log.warn(error.message);
       }
     });
 
-    // Tick 500ms, mỗi gateway tự giữ chu_ky_gui riêng (mặc định 2s).
+    // Fine ticks preserve separate publish phases at the configured device rate.
     this.timer = setInterval(() => {
       this.tick().catch((error) => this.log.warn(error.message));
-    }, 500);
+    }, 100);
 
     // Tải lại danh sách + chu kỳ 30s để bắt thiết bị mới/sửa chu_ky_gui.
     this.refresher = setInterval(() => {
@@ -203,7 +209,7 @@ export class VirtualDevices
 
   private async loadDevices() {
     const exclude = new Set(
-      (process.env.SIM_VIRTUAL_EXCLUDE || DEFAULT_EXCLUDE)
+      (DEFAULT_EXCLUDE + ',' + (process.env.SIM_VIRTUAL_EXCLUDE || ''))
         .split(',')
         .map((id) => id.trim())
         .filter(Boolean),
@@ -254,7 +260,7 @@ export class VirtualDevices
       ];
       const usage = kept?.usage ?? 0.15 + ((idx * 37) % 70) / 100;
       const seedBase = kept?.power ?? 1500 + ((idx * 211) % 1500);
-      this.devices.set(topic, {
+      const next: VirtualState = {
         id: row._id,
         topic,
         roomCode:
@@ -271,6 +277,9 @@ export class VirtualDevices
         energy: kept ? kept.energy : 0.5 + Math.random() * 1.5,
         index: index + 1,
         acks: kept?.acks || new Map(),
+        observeUntil: kept?.observeUntil ?? Date.now() + Math.max(5000, period * 2000) + Math.floor(Math.random() * period * 1000),
+        blocked: kept?.blocked ?? false,
+        published: kept?.published ?? new Set(),
         // Khởi tạo quanh dàn tải Wokwi để kỳ đầu không nhảy từ 0.
         power: kept?.power ?? seedBase,
         voltage: kept?.voltage ?? 220,
@@ -279,7 +288,9 @@ export class VirtualDevices
         loadOn,
         acOffset1: kept?.acOffset1 ?? 0,
         acOffset2: kept?.acOffset2 ?? 17000,
-      });
+      };
+      // Refresh must not replace an object whose publish is still in flight.
+      this.devices.set(topic, kept ? Object.assign(kept, next) : next);
     }
 
     for (const topic of [...this.devices.keys()]) {
@@ -288,6 +299,15 @@ export class VirtualDevices
   }
 
   private handle(topic: string, bytes: Buffer) {
+    if (topic.endsWith('/telemetry')) {
+      const state = this.devices.get(topic.slice(0, -'/telemetry'.length));
+      if (!state || state.blocked) return;
+      const sample = JSON.parse(bytes.toString());
+      if (sample.ma_thiet_bi !== state.id || state.published.has(sample.thoi_gian_do)) return;
+      state.blocked = true;
+      this.log.error(`Virtual device ${state.id} disabled: another publisher is using ${state.topic}. Stop the duplicate source, then restart the simulator.`);
+      return;
+    }
     const base = topic.endsWith('/command')
       ? topic.slice(0, -'/command'.length)
       : topic.endsWith('/config')
@@ -297,7 +317,7 @@ export class VirtualDevices
     if (!base) return;
 
     const state = this.devices.get(base);
-    if (!state || !this.client?.connected) return;
+    if (!state || state.blocked || !this.client?.connected) return;
 
     const payload = JSON.parse(bytes.toString());
 
@@ -341,6 +361,7 @@ export class VirtualDevices
     // Tick định kỳ vẫn giữ nguyên; reset state.last để không publish trùng.
     try {
       const now = Date.now();
+      this.rememberPublish(state, new Date(now).toISOString());
       const smoothed = smoothSample(state, 0.5, now);
       const power = state.relay ? smoothed.power : 0;
       const voltage = smoothed.voltage;
@@ -374,7 +395,7 @@ export class VirtualDevices
             o_cam: detailArr[5] ?? 0,
           },
         }),
-        { qos: 1 },
+        { qos: 0 },
       );
       state.last = now;
     } catch {}
@@ -415,7 +436,7 @@ export class VirtualDevices
     try {
       const now = Date.now();
       const due = [...this.devices.values()].filter(
-        (state) => now - state.last >= state.period * 1000,
+        (state) => !state.blocked && now >= state.observeUntil && now - state.last >= state.period * 1000,
       );
 
       if (!due.length) return;
@@ -456,6 +477,7 @@ export class VirtualDevices
             },
           };
 
+          this.rememberPublish(state, payload.thoi_gian_do);
           await this.client!.publishAsync(
             `${state.topic}/telemetry`,
             JSON.stringify(payload),
@@ -465,10 +487,8 @@ export class VirtualDevices
             { qos: 0 },
           );
 
-          // Giữ rải pha: last = now + jitter 0-500ms thay vì cùng 1 mốc,
-          // nếu không 15 gateway sẽ đồng bộ và dồn 15 insert Atlas cùng
-          // lúc mỗi chu kỳ, chặn event-loop và làm chậm đường Wokwi.
-          state.last = Date.now() + Math.floor(Math.random() * 500);
+          // Keep the actual publish time; initial phases are already staggered.
+          state.last = now;
         }),
       );
 
@@ -482,5 +502,10 @@ export class VirtualDevices
     } finally {
       this.busy = false;
     }
+  }
+
+  private rememberPublish(state: VirtualState, timestamp: string) {
+    state.published.add(timestamp);
+    if (state.published.size > 64) state.published.delete(state.published.values().next().value!);
   }
 }

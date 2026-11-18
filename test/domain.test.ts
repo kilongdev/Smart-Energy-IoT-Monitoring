@@ -4,6 +4,88 @@ import { MemoryStore as MemoryDatabase } from './memory-store';
 import { mergeAlertRecords, isAlertOpen } from '../web/alert-records';
 import { updateLiveReading, preserveNewerReadings } from '../web/live-readings';
 import { createAlertRefresh } from '../web/alert-refresh';
+import { Telemetry } from '../src/telemetry';
+import { VirtualDevices } from '../src/virtual-devices';
+
+test('Virtual fleet protects Wokwi IDs and stops a duplicate publisher without blocking other rooms', async t => {
+ t.mock.timers.enable({apis:['Date'],now:Date.now()});
+ const old=process.env.SIM_VIRTUAL_EXCLUDE; process.env.SIM_VIRTUAL_EXCLUDE='extra';
+ try {
+  const db=new MemoryDatabase();
+  for(const id of ['44444444-4444-4444-8444-444444444444','e5a539e0-b1c2-498c-8153-5349795974fd','extra','virtual','other'])
+   await db.collection('devices').insertOne({_id:id,chu_de_mqtt:'campus/devices/'+id,chu_ky_gui:2});
+  const sim=new VirtualDevices(db as any) as any,sent:any[]=[];
+  sim.client={connected:true,publishAsync:async(topic:string,payload:string)=>sent.push({topic,payload:JSON.parse(payload)})};
+  await sim.loadDevices();assert.equal(sim.devices.size,2);
+  await sim.tick();assert.equal(sent.length,0,'listen before publishing');
+  t.mock.timers.tick(8000);await sim.tick();assert.equal(sent.length,2);
+  const state=sim.devices.get('campus/devices/virtual');
+  await sim.loadDevices();assert.equal(sim.devices.get(state.topic),state,'preserve in-flight state');
+  const own=sent.find(x=>x.payload.ma_thiet_bi==='virtual');
+  sim.handle(own.topic,Buffer.from(JSON.stringify(own.payload)));assert.equal(state.blocked,false);
+  sim.handle(own.topic,Buffer.from(JSON.stringify({...own.payload,thoi_gian_do:new Date(Date.now()+1).toISOString()})));
+  assert.equal(state.blocked,true);
+  t.mock.timers.tick(2000);await sim.tick();assert.equal(sent.length,3);
+  assert.equal(sent[2].payload.ma_thiet_bi,'other');
+ } finally {if(old===undefined)delete process.env.SIM_VIRTUAL_EXCLUDE;else process.env.SIM_VIRTUAL_EXCLUDE=old;}
+});
+import { readAuthToken, saveAuthToken, clearAuthToken } from '../web/auth-storage';
+
+test('Remember login stores only the token; switching mode and logout clear both stores', () => {
+ const storage=()=>{const values=new Map<string,string>();return {getItem:(k:string)=>values.get(k)??null,setItem:(k:string,v:string)=>values.set(k,v),removeItem:(k:string)=>values.delete(k)} as unknown as Storage;};
+ const session=storage(),local=storage();
+ saveAuthToken('session-token',false,session,local);
+ assert.equal(readAuthToken(session,local),'session-token');
+ assert.equal(local.getItem('energy-token'),null);
+ saveAuthToken('remembered-token',true,session,local);
+ assert.equal(session.getItem('energy-token'),null);
+ assert.equal(readAuthToken(storage(),local),'remembered-token');
+ saveAuthToken('new-account',false,session,local);
+ assert.equal(local.getItem('energy-token'),null);
+ clearAuthToken(session,local);
+ assert.equal(readAuthToken(session,local),null);
+});
+import { createAlertLiveOverlay, upsertLiveAlert } from '../web/alert-live';
+
+test('Socket recovery and delivery details survive an older HTTP response', () => {
+ const live=createAlertLiveOverlay();
+ const active={_id:'a',isOpen:true,measurementState:'ACTIVE',thoi_gian_phat_hien:'2026-11-18T10:00:00Z'};
+ live.beginRead();
+ const recovering={...active,measurementState:'RECOVERING',snapshot:{sample:{cong_suat_w:3000}}};
+ live.accept(recovering);
+ assert.equal(live.reconcile([active])[0].measurementState,'RECOVERING');
+ const recovered={...recovering,isOpen:false,measurementState:'RECOVERED',trang_thai_gui:'sent'};
+ live.accept(recovered);
+ assert.deepEqual(live.reconcile([active],true),[]);
+ assert.deepEqual(live.reconcile([active]),[recovered]);
+ assert.deepEqual(upsertLiveAlert([active],recovered,true),[]);
+ live.beginRead();
+ assert.deepEqual(live.reconcile([recovered]),[recovered]);
+});
+
+test('Telemetry preserves evaluation order, does not block other devices, and awaits persistence', async () => {
+ const db = new MemoryDatabase();
+ for (const id of ['a','b']) await db.collection('devices').insertOne({_id:id,chu_de_mqtt:'campus/devices/'+id});
+ let release!:()=>void, started!:()=>void;
+ const gate = new Promise<void>(r=>release=r), entered=new Promise<void>(r=>started=r);
+ const calls:string[]=[];
+ const telemetry=new Telemetry(db as any,{get:async(_:string,id:string)=>({_id:id,chu_de_mqtt:'campus/devices/'+id})} as any,
+  {evaluate:async(d:any,s:any)=>{calls.push(d._id+':'+s.cong_suat_w);if(d._id==='a'&&s.cong_suat_w===5000){started();await gate;}}} as any,
+  {dirty:async()=>{}} as any,{send:()=>{}} as any);
+ const now=Date.now();
+ const sample=(id:string,power:number,offset:number)=>({ma_thiet_bi:id,thoi_gian_do:new Date(now+offset).toISOString(),cong_suat_w:power,trang_thai_relay:true});
+ const first=telemetry.ingest(sample('a',5000,0));await entered;
+ const second=telemetry.ingest(sample('a',3000,1));
+ await telemetry.ingest(sample('b',100,0));
+ assert.deepEqual(calls,['a:5000','b:100']);
+ assert.equal(await db.collection('telemetry').countDocuments({ma_thiet_bi:'a',processed:true}),0);
+ release();await Promise.all([first,second]);
+ assert.deepEqual(calls,['a:5000','b:100','a:3000']);
+ assert.equal(await db.collection('telemetry').countDocuments({processed:true}),3);
+ await telemetry.ingest({...sample('a',3000,1),trang_thai_relay:false});
+ assert.equal((await db.collection('devices').findOne({_id:'a'})).trang_thai_relay,true);
+ assert.equal(calls.length,3);
+});
 
 test('Alert event during HTTP read is not lost and stale response cannot overwrite recovery', async () => {
  const reads: Array<(value:string)=>void> = [];

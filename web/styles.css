@@ -279,6 +279,12 @@ header p {
   width: 20px;
   height: 20px;
 }
+.notification-button.has-alerts { color: #b54737; border-color: #e7b7af; background: #fff4f1; }
+.notification-button > span:first-child { display: inline-flex; }
+.bell-ring { transform-origin: 50% 15%; animation: bell-ring 700ms ease-in-out 3; }
+@keyframes bell-ring { 0%,100% { transform: rotate(0); } 20%,60% { transform: rotate(18deg); } 40%,80% { transform: rotate(-18deg); } }
+.bell-announcement { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) { .bell-ring { animation: none; } }
 .notification-count {
   position: absolute;
   top: -4px;
@@ -1034,6 +1040,9 @@ footer {
 .login-form input {
   height: 45px;
 }
+.login-form .remember-login { flex-direction: row; align-items: center; gap: 10px; margin: 18px 0 8px; cursor: pointer; }
+.login-form .remember-login input { width: 16px; height: 16px; margin: 0; accent-color: #1c5541; }
+.remember-login + small { display: block; line-height: 1.6; margin-bottom: 18px; }
 .wide {
   width: 100%;
   height: 46px;
