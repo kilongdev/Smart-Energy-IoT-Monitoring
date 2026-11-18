@@ -24,7 +24,97 @@ type VirtualState = {
   energy: number;
   index: number;
   acks: Map<string, any>;
+  // Giữ giá trị mượt giữa các kỳ để công suất không nhảy loạn.
+  power: number;
+  voltage: number;
+  temp: number;
+  // Cấu hình tải na ná sketch Wokwi (den/quat/2xML/may_chieu + ổ cắm).
+  usage: number;
+  loadOn: boolean[];
+  acOffset1: number;
+  acOffset2: number;
 };
+
+// Dàn tải chuẩn Wokwi – dùng chung cho cả 15 máy giả lập.
+// den 360W, quat 240W, 2x máy lạnh 1100W (chạy 30s/nghỉ 10s), máy chiếu 250W,
+// tải thường trực 40W + ổ cắm 0–500W theo núm vặn.
+const WOKWI_LOADS = [
+  { watts: 360, cycling: false },
+  { watts: 240, cycling: false },
+  { watts: 1100, cycling: true },
+  { watts: 1100, cycling: true },
+  { watts: 250, cycling: false },
+];
+const WOKWI_ESSENTIAL_W = 40;
+const WOKWI_RATED_W = 4000;
+
+function wokwiLoadPower(loadIdx: number, now: number, offset: number, noise: number) {
+  const load = WOKWI_LOADS[loadIdx];
+  if (!load.cycling) return load.watts * noise;
+  const phase = (now + offset) % 40000;
+  return (phase < 30000 ? load.watts : load.watts * 0.12) * noise;
+}
+
+// Làm mượt na ná sketch Wokwi: dàn tải den 360 + quat 240 + 2xML 1100
+// (chạy 30s/nghỉ 10s) + máy chiếu 250 + thường trực 40 + ổ cắm 0–500W.
+// Nhiễu ±3% như `random(-30,31)/1000` trên ESP nên đường êm hơn hẳn.
+function smoothSample(state: VirtualState, periodSec: number, now: number) {
+    if (!state.relay) {
+    const power = state.power > 1 ? Math.round(state.power * 0.3 * 10) / 10 : 0;
+    state.power = power;
+    return {
+      power,
+      voltage: Math.round((state.voltage + (220 - state.voltage) * 0.3) * 10) / 10,
+      current: 0,
+      temperature: Math.round((state.temp + (27 - state.temp) * 0.2) * 10) / 10,
+      leak: 0.5,
+      enabledLoads: 0,
+      details: null as any,
+    };
+  }
+  const noise = 1 + (Math.random() - 0.5) * 0.06;
+  const offsets = [0, 0, state.acOffset1, state.acOffset2, 0];
+  let switched = 0;
+  let enabledLoads = 0;
+  const details: number[] = [];
+  for (let i = 0; i < WOKWI_LOADS.length; i++) {
+    let v = 0;
+    if (state.loadOn[i]) {
+      v = wokwiLoadPower(i, now, offsets[i], noise);
+      enabledLoads++;
+    }
+    details.push(Math.round(v * 10) / 10);
+    switched += v;
+  }
+  const oCam = 500 * state.usage * noise;
+  details.push(Math.round(oCam * 10) / 10);
+  switched += oCam;
+  const rawTarget = WOKWI_ESSENTIAL_W * noise + switched;
+  // Trôi 60% về target mỗi kỳ: giữ nhiễu ±3% của Wokwi nhưng không giật cục.
+  let power = state.power + (rawTarget - state.power) * 0.6;
+  power = Math.round(power * 10) / 10;
+  state.power = power;
+  // Drift nhẹ núm vặn ổ cắm để mỗi phòng có cá tính riêng.
+  state.usage = Math.min(0.95, Math.max(0.05, state.usage + (Math.random() - 0.5) * 0.02));
+  const rawVoltage = 220 + (Math.random() - 0.5) * 4;
+  const voltage = Math.round((state.voltage + (rawVoltage - state.voltage) * 0.5) * 10) / 10;
+  state.voltage = voltage;
+  const tempTarget = 29 + (power / WOKWI_RATED_W) * 4;
+  const temperature = Math.round((state.temp + (tempTarget - state.temp) * 0.3 + (Math.random() - 0.5) * 0.2) * 10) / 10;
+  state.temp = temperature;
+  const current = Math.round(((power / (voltage * 0.95) || 0) * 100)) / 100;
+  state.energy += (power * periodSec) / 3_600_000;
+  if (state.energy > 9999) state.energy = 0.5;
+  return {
+    power,
+    voltage,
+    current,
+    temperature,
+    leak: Math.round((30 + Math.random() * 50) / 10) / 10,
+    enabledLoads,
+    details,
+  };
+}
 
 const DEFAULT_EXCLUDE = [
   '44444444-4444-4444-8444-444444444444', // A101 (Wokwi)
@@ -152,6 +242,18 @@ export class VirtualDevices
 
       const kept = this.devices.get(topic);
 
+      // Mỗi phòng có "cá tính" riêng như núm vặn + công tắc trên Wokwi:
+      // ổ cắm 5–95%, 3–5 tải bật, 2 máy lạnh lệch pha 17s.
+      const idx = index + 1;
+      const loadOn = kept?.loadOn ?? [
+        true,
+        (idx * 7) % 10 < 7,
+        (idx * 3) % 10 < 8,
+        (idx * 5 + 3) % 10 < 6,
+        (idx * 11) % 10 < 5,
+      ];
+      const usage = kept?.usage ?? 0.15 + ((idx * 37) % 70) / 100;
+      const seedBase = kept?.power ?? 1500 + ((idx * 211) % 1500);
       this.devices.set(topic, {
         id: row._id,
         topic,
@@ -167,8 +269,16 @@ export class VirtualDevices
         last: kept?.last ?? Date.now() - Math.floor(Math.random() * period * 1000),
         relay: kept ? kept.relay : true,
         energy: kept ? kept.energy : 0.5 + Math.random() * 1.5,
-        index,
+        index: index + 1,
         acks: kept?.acks || new Map(),
+        // Khởi tạo quanh dàn tải Wokwi để kỳ đầu không nhảy từ 0.
+        power: kept?.power ?? seedBase,
+        voltage: kept?.voltage ?? 220,
+        temp: kept?.temp ?? 29,
+        usage,
+        loadOn,
+        acOffset1: kept?.acOffset1 ?? 0,
+        acOffset2: kept?.acOffset2 ?? 17000,
       });
     }
 
@@ -226,6 +336,49 @@ export class VirtualDevices
     const mode = process.env.SIM_ACK_MODE || 'normal';
     state.relay = payload.hanh_dong === 'Bật';
 
+    // Gửi ngay 1 bản telemetry sau khi đổi relay để dashboard thấy công
+    // suất về 0 (Tắt) / có tải (Bật) trong ~0.5s thay vì chờ hết chu_ky_gui.
+    // Tick định kỳ vẫn giữ nguyên; reset state.last để không publish trùng.
+    try {
+      const now = Date.now();
+      const smoothed = smoothSample(state, 0.5, now);
+      const power = state.relay ? smoothed.power : 0;
+      const voltage = smoothed.voltage;
+      const current = state.relay ? smoothed.current : 0;
+      const temperature = smoothed.temperature;
+      const leak = smoothed.leak;
+      const detailArr = Array.isArray(smoothed.details) ? smoothed.details : [];
+      this.client?.publish(
+        `${state.topic}/telemetry`,
+        JSON.stringify({
+          ma_thiet_bi: state.id,
+          ma_phong: state.roomCode,
+          thoi_gian_do: new Date(now).toISOString(),
+          uptime_s: Math.floor((now - this.startedAt) / 1000),
+          cong_suat_w: power,
+          dien_ap_v: voltage,
+          dong_dien_a: current,
+          nhiet_do_c: temperature,
+          dong_ro_ma: leak,
+          dien_nang_kwh: Math.round(state.energy * 10000) / 10000,
+          trang_thai_relay: state.relay,
+          dinh_muc_w: WOKWI_RATED_W,
+          che_do_gia_lap: 'binh_thuong',
+          so_thiet_bi_bat: smoothed.enabledLoads ?? 0,
+          chi_tiet_mo_phong: {
+            den: detailArr[0] ?? 0,
+            quat: detailArr[1] ?? 0,
+            may_lanh_1: detailArr[2] ?? 0,
+            may_lanh_2: detailArr[3] ?? 0,
+            may_chieu: detailArr[4] ?? 0,
+            o_cam: detailArr[5] ?? 0,
+          },
+        }),
+        { qos: 1 },
+      );
+      state.last = now;
+    } catch {}
+
     if (mode === 'drop') return;
 
     const ack = {
@@ -269,19 +422,14 @@ export class VirtualDevices
 
       const results = await Promise.allSettled(
         due.map(async (state) => {
-          // Tải nền + nhiễu, tương tự sketch.ino nhưng gọn cho 15 phòng.
-          const base = 420 + ((state.index * 53) % 480);
-          const power = state.relay
-            ? Math.round((base + Math.random() * 90) * 10) / 10
-            : 0;
-          const voltage = Math.round((219 + Math.random() * 3) * 10) / 10;
-          const current =
-            Math.round(((power / (voltage * 0.95) || 0) * 100)) / 100;
-          const temperature =
-            Math.round((state.relay ? 31 + (state.index % 5) : 27) + Math.random() * 10) / 10;
-          const leak = Math.round((3 + Math.random() * 6) * 10) / 10;
-          state.energy += (power * state.period) / 3_600_000;
-          if (state.energy > 9999) state.energy = 0.5;
+          // Na ná Wokwi: cùng dàn tải, cùng nhiễu ±3%, trôi 60% về target.
+          const smoothed = smoothSample(state, state.period, now);
+          const power = smoothed.power;
+          const voltage = smoothed.voltage;
+          const current = smoothed.current;
+          const temperature = smoothed.temperature;
+          const leak = smoothed.leak;
+          const detailArr = Array.isArray(smoothed.details) ? smoothed.details : [];
 
           const payload = {
             ma_thiet_bi: state.id,
@@ -295,19 +443,32 @@ export class VirtualDevices
             dong_ro_ma: leak,
             dien_nang_kwh: Math.round(state.energy * 10000) / 10000,
             trang_thai_relay: state.relay,
-            dinh_muc_w: state.dinhMuc,
+            dinh_muc_w: WOKWI_RATED_W,
             che_do_gia_lap: 'binh_thuong',
+            so_thiet_bi_bat: smoothed.enabledLoads ?? 0,
+            chi_tiet_mo_phong: {
+              den: detailArr[0] ?? 0,
+              quat: detailArr[1] ?? 0,
+              may_lanh_1: detailArr[2] ?? 0,
+              may_lanh_2: detailArr[3] ?? 0,
+              may_chieu: detailArr[4] ?? 0,
+              o_cam: detailArr[5] ?? 0,
+            },
           };
 
           await this.client!.publishAsync(
             `${state.topic}/telemetry`,
             JSON.stringify(payload),
-            { qos: 1 },
+            // Telemetry fleet dùng QoS 0: Wokwi thật cũng publish QoS 0,
+            // giảm 1/2 tải PUBACK trên EMQX free-tier để nhường slot cho
+            // ACK lệnh Bật/Tắt (vẫn QoS 1) của Wokwi về trong 1-2s.
+            { qos: 0 },
           );
 
-          // Chỉ tính đã gửi khi publish thành công; thất bại giữ nguyên
-          // để tick sau retry ngay thay vì trễ thêm cả chu kỳ.
-          state.last = now;
+          // Giữ rải pha: last = now + jitter 0-500ms thay vì cùng 1 mốc,
+          // nếu không 15 gateway sẽ đồng bộ và dồn 15 insert Atlas cùng
+          // lúc mỗi chu kỳ, chặn event-loop và làm chậm đường Wokwi.
+          state.last = Date.now() + Math.floor(Math.random() * 500);
         }),
       );
 

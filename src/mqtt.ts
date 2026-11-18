@@ -49,10 +49,14 @@ export class Mqtt implements OnApplicationBootstrap, OnModuleDestroy {
     this.client = mqtt.connect(
       process.env.MQTT_URL,
       {
-        clientId: 'smart-energy-backend',
+        // ClientId cố định khiến 2 backend (local + Render) đá nhau khỏi
+        // EMQX (clean:false giữ session) -> connect/close liên tục và
+        // Control.send báo "MQTT chưa kết nối" dù broker vẫn sống.
+        // Dùng id duy nhất mỗi tiến trình để không tranh session.
+        clientId: `smart-energy-backend-${process.pid}-${Math.random().toString(36).slice(2, 8)}`,
         username: process.env.MQTT_USERNAME,
         password: process.env.MQTT_PASSWORD,
-        clean: false,
+        clean: true,
         reconnectPeriod: 2000,
         connectTimeout: 5000,
         queueQoSZero: false,
@@ -146,7 +150,11 @@ export class Mqtt implements OnApplicationBootstrap, OnModuleDestroy {
           realtimeTrace('mqtt.received', { deviceId: copy.ma_thiet_bi, measuredAt: copy.thoi_gian_do,
             receivedAt, transportDelayMs: +receivedAt - Date.parse(copy.thoi_gian_do) });
           done();
-          await this.telemetry.ingest(copy, telemetryTopic, true, receivedAt).catch(async (ingestError) => {
+          // Fire-and-forget: không await ingest ở đây. Trước đây await làm
+          // handler MQTT giữ promise trong khi 15 gateway dồn 7-8 bản/s,
+          // khiến EMQX phải chờ và ACK lệnh Wokwi bị xếp hàng sau telemetry.
+          // Ingest tự xếp hàng theo thiết bị + replay bù khi lỗi DB.
+          void this.telemetry.ingest(copy, telemetryTopic, true, receivedAt).catch(async (ingestError) => {
             if (ingestError instanceof HttpException) {
               await this.db
                 .audit('INVALID_MQTT', {
